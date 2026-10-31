@@ -10,12 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import mz  # noqa: E402
 
 
-def mz_file(body, cs, ip, relocs=(), ss=0, sp=0x100):
+def mz_file(body, cs, ip, relocs=(), ss=0, sp=0x100, min_alloc=0):
     """Wraps a program body in an MZ header whose size is rounded up to whole paragraphs."""
     header_size = (28 + 4 * len(relocs) + 15) // 16 * 16
     total = header_size + len(body)
     header = struct.pack("<2s13H", b"MZ", total % 512, (total + 511) // 512, len(relocs), header_size // 16,
-                         0, 0xFFFF, ss, sp, 0, ip, cs, 28, 0)
+                         min_alloc, 0xFFFF, ss, sp, 0, ip, cs, 28, 0)
     header += b"".join(struct.pack("<HH", off, seg) for seg, off in relocs)
     return header.ljust(header_size, b"\0") + body
 
@@ -23,7 +23,7 @@ def mz_file(body, cs, ip, relocs=(), ss=0, sp=0x100):
 EXPECTED = b"ABCD" + b"\xAA" * 20 + b"XYZ" + b"\xBB" * 5
 
 
-def packed_body(stream_tail=None):
+def packed_body(stream_tail=None, dest_len=2):
     """Builds an EXEPACK body that expands to EXPECTED and carries one relocation at 0000:0010."""
     stream = b"ABCD" + b"\xAA" + struct.pack("<H", 20) + b"\xB1" + b"XYZ" + struct.pack("<H", 3) + b"\xB2" \
         + b"\xBB" + struct.pack("<H", 5) + (stream_tail or b"\xB0")
@@ -31,7 +31,7 @@ def packed_body(stream_tail=None):
     stub_code = b"\x90" * 8 + mz.EXEPACK_ERROR_TEXT
     relocs = struct.pack("<HH", 1, 0x0010) + struct.pack("<H", 0) * 15
     exepack_size = 18 + len(stub_code) + len(relocs)
-    header = struct.pack("<8H", 0x0003, 0x0000, 0, exepack_size, 0x0100, 0x0001, 2, 1) + mz.EXEPACK_SIGNATURE
+    header = struct.pack("<8H", 0x0003, 0x0000, 0, exepack_size, 0x0100, 0x0001, dest_len, 1) + mz.EXEPACK_SIGNATURE
     return compressed + header + stub_code + relocs
 
 
@@ -49,6 +49,22 @@ class MzLoaderTests(unittest.TestCase):
         self.assertEqual(bytes(image.data), EXPECTED)
         self.assertEqual((image.cs, image.ip, image.ss, image.sp), (0, 3, 1, 0x100))
         self.assertEqual(image.relocs, [(0, 0x0010)])
+
+    def test_exepack_extra_memory_is_what_the_packed_program_requested_beyond_the_unpacked_image(self):
+        body = packed_body()
+        image = self.load_bytes(mz_file(body, cs=2, ip=0x12, min_alloc=10))
+        self.assertEqual(image.min_extra_paragraphs, (len(body) + 15) // 16 + 10 - 2)
+
+    def test_exepack_fill_that_would_overwrite_unread_input_is_rejected(self):
+        # With only one paragraph of output space, the first fill lands on compressed bytes not yet read.
+        with self.assertRaises(mz.MzError):
+            self.load_bytes(mz_file(packed_body(dest_len=1), cs=2, ip=0x12))
+
+    def test_relocation_table_past_end_of_file_is_rejected_with_mz_error(self):
+        data = bytearray(mz_file(bytes(32), cs=0, ip=0))
+        data[6:8] = struct.pack("<H", 50)
+        with self.assertRaises(mz.MzError):
+            self.load_bytes(bytes(data))
 
     def test_exepack_unknown_command_is_rejected_instead_of_producing_an_image(self):
         with self.assertRaises(mz.MzError):

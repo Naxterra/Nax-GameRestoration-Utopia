@@ -1,6 +1,7 @@
 """Tests for code discovery, using hand-assembled 16-bit programs."""
 import os
 import sys
+import types
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "recomp"))
@@ -78,6 +79,39 @@ class SettingsTableTests(unittest.TestCase):
         self.assertEqual(disc.tables, [])
         self.assertEqual(len(disc.indirect), 1)
 
+    def test_report_never_calls_settings_tables_proven_when_no_aliasing_store_is_detected(self):
+        disc = explore(settings_table_program())
+        self.assertEqual(disc.alias_risks, [])
+        report = disc.report("test")
+        self.assertIn("no aliasing store was detected", report)
+        self.assertNotIn("are proven", report)
+
+    def test_jump_between_index_load_and_table_jump_marks_table_unproven(self):
+        code = bytearray(0x50)
+        code[0x00:0x07] = bytes.fromhex("2ec70640000000")  # mov word ptr cs:[0040], 0
+        code[0x07:0x09] = bytes.fromhex("720f")            # jc 0018
+        code[0x09:0x0E] = bytes.fromhex("2e8b1e4000")      # mov bx, word ptr cs:[0040]
+        code[0x0E:0x13] = bytes.fromhex("2effa73000")      # jmp word ptr cs:[bx + 0030]
+        code[0x18:0x1D] = bytes.fromhex("bb0400" "ebf1")   # mov bx, 4 / jmp 000E, which skips the load
+        code[0x20:0x24] = EXIT
+        code[0x30:0x34] = bytes.fromhex("20002800")
+        disc = explore(code)
+        self.assertTrue(disc.tables[0][4].endswith("(unproven)"))
+        self.assertTrue(any("unproven" in text for _cs, _ip, text in disc.indirect))
+
+    def test_settings_table_in_second_code_segment_reports_no_false_growth(self):
+        # A relocated far jump enters segment 0001, where the settings program lies. Segment 0000 holds other bytes.
+        code = bytearray(0x10) + settings_table_program()
+        code[0:5] = bytes.fromhex("ea00000100")              # ljmp 0001:0000
+        disc = discover.Discovery(mz.MzImage(code, [(0, 3)], 0, 0, 0, 0x100))
+        disc.run()
+        self.assertEqual(len(disc.tables), 1)
+        self.assertEqual(disc.grown_vars, [])
+
+    def test_explicit_ds_store_with_bp_base_counts_as_alias_risk_after_ds_is_loaded_from_cs(self):
+        disc = explore(bytes.fromhex("0e1f" "3e894600") + EXIT)  # push cs / pop ds / mov ds:[bp], ax
+        self.assertEqual(len(disc.alias_risks), 1)
+
     def test_register_store_through_cs_marks_settings_tables_as_assumptions(self):
         # mov word ptr cs:[bx], ax could write the variable without naming it.
         disc = explore(settings_table_program(second_store=bytes.fromhex("2e890790909090")))
@@ -93,6 +127,21 @@ class BoundedTableTests(unittest.TestCase):
         self.assertIn(0x28, disc.code)
         self.assertNotIn(0x99, disc.code)
         self.assertEqual(disc.indirect, [])
+
+    def test_jump_into_bounded_sequence_after_cmp_marks_table_unproven(self):
+        code = bytearray(0x50)
+        code[0x00:0x02] = bytes.fromhex("720e")            # jc 0010
+        code[0x02:0x07] = bytes.fromhex("83fb01" "7729")    # cmp bx, 1 / ja 0030
+        code[0x07:0x09] = bytes.fromhex("d1e3")            # shl bx, 1
+        code[0x09:0x0E] = bytes.fromhex("2effa74000")      # jmp word ptr cs:[bx + 0040]
+        code[0x10:0x15] = bytes.fromhex("bb0500" "ebf2")   # mov bx, 5 / jmp 0007, which skips the cmp
+        code[0x20:0x24] = EXIT
+        code[0x28:0x2C] = EXIT
+        code[0x30:0x34] = EXIT
+        code[0x40:0x44] = bytes.fromhex("20002800")
+        disc = explore(code)
+        self.assertTrue(disc.tables[0][4].endswith("(unproven)"))
+        self.assertTrue(any("unproven" in text for _cs, _ip, text in disc.indirect))
 
     def test_jb_before_table_jump_is_not_taken_as_upper_bound(self):
         # The jump is reached when jb is not taken, that is with bx >= 4, so the cmp proves no upper bound.
@@ -145,6 +194,23 @@ class FlowTests(unittest.TestCase):
         disc = explore(code)
         self.assertIn(0x20, disc.code)
         self.assertIn((0, 0x20), disc.int_handlers)
+        self.assertEqual(disc.unproven, [])
+
+    def test_jump_between_dx_load_and_handler_install_marks_handler_unproven(self):
+        code = bytearray(0x30)
+        code[0x00:0x02] = bytes.fromhex("720e")                            # jc 0010
+        code[0x02:0x0C] = bytes.fromhex("0e1f" "ba2000" "b80825" "cd21")   # push cs / pop ds / mov dx, 0020 / mov ax, 2508h / int 21h
+        code[0x0C:0x10] = EXIT
+        code[0x10:0x15] = bytes.fromhex("ba2800" "ebf2")                   # mov dx, 0028 / jmp 0007, a second handler address
+        code[0x20] = 0xCF
+        disc = explore(code)
+        self.assertEqual(len(disc.unproven), 1)
+        self.assertTrue(any("handler" in text and "unproven" in text for _cs, _ip, text in disc.indirect))
+
+    def test_memory_destination_without_access_flags_is_treated_as_written(self):
+        mem = types.SimpleNamespace(type=discover.x86.X86_OP_MEM, access=0)
+        self.assertEqual(len(discover.Discovery.stored_operands(types.SimpleNamespace(mnemonic="mov", operands=[mem]))), 1)
+        self.assertEqual(discover.Discovery.stored_operands(types.SimpleNamespace(mnemonic="cmp", operands=[mem])), [])
 
     def test_far_call_through_memory_is_reported_as_run_time_target(self):
         disc = explore(bytes.fromhex("ff5f10") + EXIT)  # lcall [bx + 10]

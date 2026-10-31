@@ -30,6 +30,7 @@ PORT_INSTRUCTIONS = {"in", "out", "insb", "insw", "outsb", "outsw"}
 # Signed branches still let a negative index through, which reads far outside the table.
 UPPER_BOUND_BRANCHES = {"ja": True, "jae": False}  # branch -> whether the compared value itself is allowed
 BARRIERS = {"call", "lcall", "int", "into"}
+READ_ONLY_DESTINATIONS = {"cmp", "test", "push", "jmp", "call", "lcall", "ljmp"}
 MAX_TABLE_ENTRIES = 256
 
 _FAMILIES = {}
@@ -71,6 +72,11 @@ class Discovery:
         # Instructions between "mov ah, 4Ch" and its "int 21h". Reaching one of them by another path
         # means AH is unknown there, so the code after that int must be explored after all.
         self.exit_chain = {}
+        # Every address that some transfer reaches. A deduction drawn from a straight-line sequence only holds
+        # when no other path enters that sequence after its first instruction.
+        self.targets = set()
+        self.deductions = []  # (cs, ip, linear addresses the deduction depends on, table index or None, description)
+        self.unproven = []
         self.work = []
 
     def segword(self, linear):
@@ -85,7 +91,29 @@ class Discovery:
             self.functions.add((cs, ip))
         elif kind == "handler":
             self.int_handlers.add((cs, ip))
+        self.targets.add(self.image.linear(cs, ip))
         self.work.append((cs, ip))
+
+    @staticmethod
+    def position(seq, insn):
+        return next(i for i, x in enumerate(seq) if x is insn)
+
+    def dependents(self, cs, seq, start, point_lin):
+        """Returns the addresses after seq[start] up to the deduction point, which no other path may enter."""
+        return {self.image.linear(cs, x.address) for x in seq[start + 1:]} | {point_lin}
+
+    def check_deductions(self):
+        """Demotes every deduction whose checked sequence is also entered by another path after its first instruction."""
+        for cs, ip, deps, table, text in self.deductions:
+            entered = sorted(deps & self.targets)
+            if not entered:
+                continue
+            where = ", ".join(f"{cs:04x}:{(lin - cs * 16) & 0xFFFF:04x}" for lin in entered)
+            self.unproven.append((cs, ip, text))
+            self.indirect.append((cs, ip, f"{text} is unproven, because {where} inside the checked sequence is also reached by a jump"))
+            if table is not None:
+                t = self.tables[table]
+                self.tables[table] = t[:4] + (t[4] + " (unproven)",)
 
     def run(self):
         self.add(self.image.cs, self.image.ip, "function")
@@ -94,12 +122,13 @@ class Discovery:
                 self.trace(*self.work.pop())
             if not self.resolve_deferred():
                 break
-        for cs, ip, insn, _disp, var in self.deferred:
+        for cs, ip, insn, _disp, var, _deps in self.deferred:
             self.indirect.append((cs, ip, f"{insn.mnemonic} {insn.op_str} (index from cs:[{var:04x}], values unknown)"))
         # Code found after a table was sized may write further values to its settings variable.
         final = self.variable_values()
-        self.grown_vars = sorted(var for var, used in self.resolved_vars.items() if self.known_values(final, var) != used)
+        self.grown_vars = sorted((cs, var) for (cs, var), used in self.resolved_vars.items() if self.known_values(final, var, cs) != used)
         self.alias_risks = self.find_alias_risks()
+        self.check_deductions()
 
     def trace(self, cs, ip):
         recent = collections.deque(maxlen=16)
@@ -182,7 +211,12 @@ class Discovery:
         dx = self.reg_value(recent, "dx")
         ds = self.segment_value(recent, "ds", cs)
         if dx is not None and dx[0] == "imm" and ds is not None:
-            self.add(ds, dx[1], "handler")
+            seq = list(recent)
+            start = min(self.position(seq, dx[2]), self.position(seq, ds[1]))
+            point = self.image.linear(cs, ip)
+            self.add(ds[0], dx[1], "handler")
+            self.deductions.append((cs, ip, self.dependents(cs, seq, start, point), None,
+                                    f"int 21h ah=25h handler {ds[0]:04x}:{dx[1]:04x}"))
         else:
             self.indirect.append((cs, ip, "int 21h ah=25h (handler address in DS:DX is not known)"))
 
@@ -195,17 +229,20 @@ class Discovery:
         if mem.segment != x86.X86_REG_CS or mem.base == 0 or mem.index != 0:
             return False
         disp = mem.disp & 0xFFFF
-        offsets = self.table_bound(recent, insn.reg_name(mem.base))
-        if offsets is not None:
-            self.resolve_table(cs, ip, insn, disp, offsets, "bounded by cmp")
+        seq = list(recent)
+        point = self.image.linear(cs, ip)
+        bound = self.table_bound(recent, insn.reg_name(mem.base))
+        if bound is not None:
+            offsets, start = bound
+            self.resolve_table(cs, ip, insn, disp, offsets, "bounded by cmp", self.dependents(cs, seq, start, point))
             return True
         source = self.index_source(recent, mem.base)
         if source is not None:
-            self.deferred.append((cs, ip, insn, disp, source))
+            self.deferred.append((cs, ip, insn, disp, source, self.dependents(cs, seq, len(seq) - 1, point)))
             return True
         return False
 
-    def resolve_table(self, cs, ip, insn, disp, offsets, how):
+    def resolve_table(self, cs, ip, insn, disp, offsets, how, deps):
         base = self.image.linear(cs, disp)
         for offset in offsets:
             pos = self.image.linear(cs, (disp + offset) & 0xFFFF)
@@ -216,6 +253,7 @@ class Discovery:
             self.table_bytes.update((pos, pos + 1))
             self.add(cs, target, "function" if insn.mnemonic == "call" else None)
         self.tables.append((cs, ip, base, len(offsets), how))
+        self.deductions.append((cs, ip, deps, len(self.tables) - 1, f"jump table at {cs:04x}:{ip:04x} ({how})"))
 
     @staticmethod
     def writes(insn):
@@ -233,7 +271,7 @@ class Discovery:
         return False
 
     def table_bound(self, recent, index_reg):
-        """Returns the byte offsets a table jump can use, proven by a cmp on the index register, or None.
+        """Returns (byte offsets, position of the first instruction relied on) for a table jump, or None.
 
         The table jump sits on the fall-through path of the branch after the cmp, so only "ja" and "jae"
         bound it from above. A cmp before the doubling compares an entry number. A cmp after the doubling
@@ -253,13 +291,15 @@ class Discovery:
                 if branch not in UPPER_BOUND_BRANCHES:
                     return None
                 limit = (ops[1].imm & 0xFFFF) + (1 if UPPER_BOUND_BRANCHES[branch] else 0)
+                start = i
                 if doubled_after_cmp:
                     offsets = [2 * k for k in range(limit)]
-                elif self.doubled_before(seq[:i], index_reg):
-                    offsets = list(range(0, limit, 2))
                 else:
-                    return None
-                return offsets if 0 < len(offsets) <= MAX_TABLE_ENTRIES else None
+                    start = self.doubled_before(seq[:i], index_reg)
+                    if start is None:
+                        return None
+                    offsets = list(range(0, limit, 2))
+                return (offsets, start) if 0 < len(offsets) <= MAX_TABLE_ENTRIES else None
             if family(index_reg) in {family(w) for w in self.writes(insn)}:
                 if self.is_doubling(insn, index_reg) and not doubled_after_cmp:
                     doubled_after_cmp = True
@@ -268,12 +308,14 @@ class Discovery:
         return None
 
     def doubled_before(self, seq, reg):
-        for insn in reversed(seq):
+        """Returns the position of the doubling that last wrote reg before the end of seq, or None."""
+        for i in range(len(seq) - 1, -1, -1):
+            insn = seq[i]
             if insn.mnemonic in BARRIERS:
-                return False
+                return None
             if family(reg) in {family(w) for w in self.writes(insn)}:
-                return self.is_doubling(insn, reg)
-        return False
+                return i if self.is_doubling(insn, reg) else None
+        return None
 
     @staticmethod
     def index_source(recent, index_reg):
@@ -288,6 +330,23 @@ class Discovery:
             return ops[1].mem.disp & 0xFFFF
         return None
 
+    @staticmethod
+    def stored_operands(insn):
+        """Returns the memory operands an instruction writes.
+
+        Capstone marks them with CS_AC_WRITE. Should a Capstone version leave the access flags empty, a memory
+        destination counts as written unless the mnemonic only reads it, which errs towards reporting a store.
+        """
+        stored = []
+        for n, op in enumerate(insn.operands):
+            if op.type != x86.X86_OP_MEM:
+                continue
+            if op.access & capstone.CS_AC_WRITE:
+                stored.append(op)
+            elif op.access == 0 and n == 0 and insn.mnemonic not in READ_ONLY_DESTINATIONS:
+                stored.append(op)
+        return stored
+
     def variable_values(self):
         """Maps each CS-relative word variable to the set of values written to it, or to None when a write is not an immediate.
 
@@ -295,9 +354,7 @@ class Discovery:
         """
         values = {}
         for cs, ip, insn in self.code.values():
-            for op in insn.operands:
-                if op.type != x86.X86_OP_MEM or not (op.access & capstone.CS_AC_WRITE):
-                    continue
+            for op in self.stored_operands(insn):
                 mem = op.mem
                 if mem.segment != x86.X86_REG_CS or mem.base != 0 or mem.index != 0:
                     continue
@@ -330,14 +387,14 @@ class Discovery:
         values = self.variable_values()
         still = []
         found = False
-        for cs, ip, insn, disp, var in self.deferred:
+        for cs, ip, insn, disp, var, deps in self.deferred:
             known = self.known_values(values, var, cs)
             if known and all(v % 2 == 0 and v < 2 * MAX_TABLE_ENTRIES for v in known):
-                self.resolve_table(cs, ip, insn, disp, sorted(known), f"indexed by cs:[{var:04x}] in {sorted(known)}")
-                self.resolved_vars[var] = set(known)
+                self.resolve_table(cs, ip, insn, disp, sorted(known), f"indexed by cs:[{var:04x}] in {sorted(known)}", deps)
+                self.resolved_vars[(cs, var)] = set(known)
                 found = True
             else:
-                still.append((cs, ip, insn, disp, var))
+                still.append((cs, ip, insn, disp, var, deps))
         self.deferred = still
         return found
 
@@ -345,8 +402,9 @@ class Discovery:
         """Lists stores that could write a settings variable without naming its address.
 
         These are stores through CS with a base or index register, and stores through DS or ES in a program
-        that ever loads DS or ES from CS. While any exist, tables sized from settings variables are assumptions
-        that the translated program must check at run time.
+        that ever loads DS or ES from CS. The check only recognises the two common ways of loading CS into DS
+        or ES (push cs / pop, and mov reg, cs / mov). An empty result is therefore no proof, and tables sized
+        from settings variables always stay assumptions that the translated program checks at run time.
         """
         cs_register_stores = []
         data_stores = []
@@ -364,13 +422,13 @@ class Discovery:
                     and len(previous.operands) == 2 and previous.operands[1].type == x86.X86_OP_REG \
                     and previous.reg_name(previous.operands[1].reg) == "cs":
                 loads_cs_into_data_segment = True
-            for op in ops:
-                if op.type != x86.X86_OP_MEM or not (op.access & capstone.CS_AC_WRITE):
-                    continue
-                if op.mem.segment == x86.X86_REG_CS:
+            for op in self.stored_operands(insn):
+                seg = op.mem.segment
+                if seg == x86.X86_REG_CS:
                     if op.mem.base != 0 or op.mem.index != 0:
                         cs_register_stores.append((cs, ip, insn.mnemonic + " " + insn.op_str))
-                elif op.mem.segment in (0, x86.X86_REG_DS, x86.X86_REG_ES) and op.mem.base not in (x86.X86_REG_BP, x86.X86_REG_SP):
+                elif seg in (x86.X86_REG_DS, x86.X86_REG_ES) or (seg == 0 and op.mem.base not in (x86.X86_REG_BP, x86.X86_REG_SP)):
+                    # Without an override, [bp] and [sp] addresses use SS. An explicit ds: or es: override counts in every form.
                     data_stores.append((cs, ip, insn.mnemonic + " " + insn.op_str))
             previous = insn
         return cs_register_stores + (data_stores if loads_cs_into_data_segment else [])
@@ -385,7 +443,7 @@ class Discovery:
         return None
 
     def reg_value(self, recent, reg):
-        """Returns ("imm", value, instruction) or ("cs",) for a 16-bit register on this path, or None when unknown."""
+        """Returns ("imm", value, instruction) or ("cs", None, instruction) for a 16-bit register on this path, or None."""
         names = {n for n, f in _FAMILIES.items() if f == reg} | {reg}
         insn = self.last_write(recent, names)
         if insn is None or insn.mnemonic != "mov" or len(insn.operands) != 2:
@@ -396,11 +454,11 @@ class Discovery:
         if src.type == x86.X86_OP_IMM:
             return ("imm", src.imm & 0xFFFF, insn)
         if src.type == x86.X86_OP_REG and insn.reg_name(src.reg) == "cs":
-            return ("cs",)
+            return ("cs", None, insn)
         return None
 
     def segment_value(self, recent, seg, cs):
-        """Returns the load-relative value of DS or ES on this path when it is provable, or None."""
+        """Returns (load-relative value, first instruction relied on) for DS or ES on this path, or None."""
         seq = list(recent)
         for i in range(len(seq) - 1, -1, -1):
             insn = seq[i]
@@ -413,17 +471,17 @@ class Discovery:
                 before = seq[i - 1] if i > 0 else None
                 if before is not None and before.mnemonic == "push" and before.operands \
                         and before.operands[0].type == x86.X86_OP_REG and before.reg_name(before.operands[0].reg) == "cs":
-                    return cs
+                    return cs, before
                 return None
             if insn.mnemonic == "mov" and len(ops) == 2 and ops[1].type == x86.X86_OP_REG:
                 value = self.reg_value(seq[:i], insn.reg_name(ops[1].reg))
                 if value is None:
                     return None
                 if value[0] == "cs":
-                    return cs
+                    return cs, value[2]
                 # An immediate is only a segment when the loader relocates it, which makes it load-relative.
                 imm_lin = self.image.linear(cs, value[2].address) + value[2].size - 2
-                return value[1] if imm_lin in self.reloc_words else None
+                return (value[1], value[2]) if imm_lin in self.reloc_words else None
             return None
         return None
 
@@ -431,7 +489,7 @@ class Discovery:
         if not insn.operands:
             return
         dst = insn.operands[0]
-        writes = insn.mnemonic not in ("cmp", "test", "push", "jmp", "call", "lcall", "ljmp")
+        writes = insn.mnemonic not in READ_ONLY_DESTINATIONS
         if writes and dst.type == x86.X86_OP_MEM and dst.mem.segment == x86.X86_REG_CS:
             target = None
             if dst.mem.base == 0 and dst.mem.index == 0:
@@ -470,16 +528,19 @@ class Discovery:
         ]
         for cs, ip, text in self.indirect:
             lines.append(f"  {cs:04x}:{ip:04x}  {text}")
-        bounded = sum(1 for t in self.tables if t[4] == "bounded by cmp")
-        lines.append(f"Jump tables resolved: {len(self.tables)} ({bounded} bounded by a cmp, {len(self.tables) - bounded} indexed by a settings variable).")
-        for var, n in collections.Counter(t[4] for t in self.tables if t[4] != "bounded by cmp").items():
+        bounded = sum(1 for t in self.tables if t[4].startswith("bounded by cmp"))
+        unproven = sum(1 for t in self.tables if t[4].endswith("(unproven)"))
+        lines.append(f"Jump tables resolved: {len(self.tables)} ({bounded} bounded by a cmp, {len(self.tables) - bounded} indexed by a settings variable, "
+                     f"{unproven} of them unproven because another path enters the checked sequence).")
+        for var, n in collections.Counter(t[4] for t in self.tables if not t[4].startswith("bounded by cmp")).items():
             lines.append(f"  {n} tables {var}")
         if self.resolved_vars:
             if self.alias_risks:
                 lines.append(f"Tables sized from settings variables are assumptions: {len(self.alias_risks)} stores could write those variables "
                              "without naming them, so the translated program must check each such index at run time.")
             else:
-                lines.append("Tables sized from settings variables are proven: no store can write those variables without naming them.")
+                lines.append("Tables sized from settings variables are assumptions: no aliasing store was detected, but the check does not cover "
+                             "every way a store can reach the code segment, so the translated program still checks each such index at run time.")
         lines.append(f"Settings variables whose value set changed after their tables were sized: {len(self.grown_vars)}.")
         clash = sorted(b for b in self.table_bytes if b in self.owner)
         lines.append(f"Table bytes that were also decoded as code: {len(clash)}.")

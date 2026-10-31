@@ -31,6 +31,7 @@ PORT_INSTRUCTIONS = {"in", "out", "insb", "insw", "outsb", "outsw"}
 UPPER_BOUND_BRANCHES = {"ja": True, "jae": False}  # branch -> whether the compared value itself is allowed
 BARRIERS = {"call", "lcall", "int", "into"}
 READ_ONLY_DESTINATIONS = {"cmp", "test", "push", "jmp", "call", "lcall", "ljmp"}
+EXCHANGES = {"xchg", "xadd", "cmpxchg"}
 MAX_TABLE_ENTRIES = 256
 
 _FAMILIES = {}
@@ -194,7 +195,7 @@ class Discovery:
         ah, ah_index = self.last_ah(recent)
         self.interrupts["int 0x%02x" % num + (" ah=0x%02x" % ah if ah is not None and num in (0x10, 0x16, 0x21, 0x33) else "")] += 1
         if num == 0x21 and ah == 0x25:
-            self.install_handler(cs, ip, recent)
+            self.install_handler(cs, ip, recent, ah_index)
         if num == 0x20:
             return False
         if num == 0x21 and ah == 0x4C:
@@ -206,13 +207,17 @@ class Discovery:
             return False
         return True
 
-    def install_handler(self, cs, ip, recent):
-        """Queues the handler of INT 21h AH=25h, which lives at DS:DX, when both registers are known on this path."""
+    def install_handler(self, cs, ip, recent, ah_index):
+        """Queues the handler of INT 21h AH=25h, which lives at DS:DX, when both registers are known on this path.
+
+        The deduction rests on the instructions that set AH, DS and DX, so a path entering after the first of
+        them may arrive with a different service number or handler address.
+        """
         dx = self.reg_value(recent, "dx")
         ds = self.segment_value(recent, "ds", cs)
         if dx is not None and dx[0] == "imm" and ds is not None:
             seq = list(recent)
-            start = min(self.position(seq, dx[2]), self.position(seq, ds[1]))
+            start = min(ah_index, self.position(seq, dx[2]), self.position(seq, ds[1]))
             point = self.image.linear(cs, ip)
             self.add(ds[0], dx[1], "handler")
             self.deductions.append((cs, ip, self.dependents(cs, seq, start, point), None,
@@ -335,7 +340,8 @@ class Discovery:
         """Returns the memory operands an instruction writes.
 
         Capstone marks them with CS_AC_WRITE. Should a Capstone version leave the access flags empty, a memory
-        destination counts as written unless the mnemonic only reads it, which errs towards reporting a store.
+        destination counts as written unless the mnemonic only reads it, and the memory operand of an exchange
+        counts as written in any position. This errs towards reporting a store.
         """
         stored = []
         for n, op in enumerate(insn.operands):
@@ -343,14 +349,16 @@ class Discovery:
                 continue
             if op.access & capstone.CS_AC_WRITE:
                 stored.append(op)
-            elif op.access == 0 and n == 0 and insn.mnemonic not in READ_ONLY_DESTINATIONS:
+            elif op.access == 0 and (insn.mnemonic in EXCHANGES or (n == 0 and insn.mnemonic not in READ_ONLY_DESTINATIONS)):
                 stored.append(op)
         return stored
 
     def variable_values(self):
-        """Maps each CS-relative word variable to the set of values written to it, or to None when a write is not an immediate.
+        """Maps the linear address of each word variable to the set of values written to it, or to None when a write is not an immediate.
 
-        A store of n bytes at X touches the word variables X-1 to X+n-1, so all of them are affected.
+        Real-mode segments overlap, so stores are keyed by linear address: a store in one segment and a variable
+        in another meet when they name the same bytes. A store of n bytes at X touches the word variables X-1 to
+        X+n-1, so all of them are affected.
         """
         values = {}
         for cs, ip, insn in self.code.values():
@@ -358,11 +366,11 @@ class Discovery:
                 mem = op.mem
                 if mem.segment != x86.X86_REG_CS or mem.base != 0 or mem.index != 0:
                     continue
-                disp = mem.disp & 0xFFFF
+                at = self.image.linear(cs, mem.disp & 0xFFFF)
                 exact = insn.mnemonic == "mov" and op.size == 2 and insn.operands[1].type == x86.X86_OP_IMM
-                for var in range(disp - 1, disp + max(op.size, 1)):
-                    var &= 0xFFFF
-                    if var == disp and exact:
+                for var in range(at - 1, at + max(op.size, 1)):
+                    var &= 0xFFFFF
+                    if var == at and exact:
                         current = values.get(var, set())
                         if current is not None:
                             current.add(insn.operands[1].imm & 0xFFFF)
@@ -372,11 +380,11 @@ class Discovery:
         return values
 
     def known_values(self, values, var, cs=None):
-        """Returns the values a variable can hold, including its initial value in the image, or None when unknown."""
-        written = values.get(var, set())
+        """Returns the values the word variable at cs:var can hold, including its initial value in the image, or None when unknown."""
+        cs = self.image.cs if cs is None else cs
+        written = values.get(self.image.linear(cs, var), set())
         if written is None:
             return None
-        cs = self.image.cs if cs is None else cs
         initial = self.segword(self.image.linear(cs, var))
         if initial is None:
             return None
@@ -540,7 +548,7 @@ class Discovery:
                              "without naming them, so the translated program must check each such index at run time.")
             else:
                 lines.append("Tables sized from settings variables are assumptions: no aliasing store was detected, but the check does not cover "
-                             "every way a store can reach the code segment, so the translated program still checks each such index at run time.")
+                             "every way a store can reach the code segment, so the translated program must check each such index at run time.")
         lines.append(f"Settings variables whose value set changed after their tables were sized: {len(self.grown_vars)}.")
         clash = sorted(b for b in self.table_bytes if b in self.owner)
         lines.append(f"Table bytes that were also decoded as code: {len(clash)}.")

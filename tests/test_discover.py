@@ -108,6 +108,27 @@ class SettingsTableTests(unittest.TestCase):
         self.assertEqual(len(disc.tables), 1)
         self.assertEqual(disc.grown_vars, [])
 
+    def second_segment_program(self, store):
+        """Runs the given store in segment 0000, then jumps far to the settings program in segment 0001."""
+        code = bytearray(0x10) + settings_table_program()
+        code[0:7] = store
+        code[7:12] = bytes.fromhex("ea00000100")              # ljmp 0001:0000, segment word at 000A
+        disc = discover.Discovery(mz.MzImage(code, [(0, 10)], 0, 0, 0, 0x100))
+        disc.run()
+        return disc
+
+    def test_store_to_same_offset_in_other_segment_does_not_add_a_value(self):
+        # 0000:0040 is linear 0040, but the variable 0001:0040 is linear 0050.
+        disc = self.second_segment_program(bytes.fromhex("2ec70640000700"))  # mov word ptr cs:[0040], 7
+        self.assertEqual(len(disc.tables), 1)
+        self.assertEqual(disc.tables[0][3], 2)
+
+    def test_store_through_overlapping_segment_adds_its_value_to_the_variable(self):
+        # 0000:0050 and 0001:0040 name the same linear word, so the value 4 selects the third table entry.
+        disc = self.second_segment_program(bytes.fromhex("2ec70650000400"))  # mov word ptr cs:[0050], 4
+        self.assertEqual(disc.tables[0][3], 3)
+        self.assertIn(0x10 + 0x2C, disc.code)
+
     def test_explicit_ds_store_with_bp_base_counts_as_alias_risk_after_ds_is_loaded_from_cs(self):
         disc = explore(bytes.fromhex("0e1f" "3e894600") + EXIT)  # push cs / pop ds / mov ds:[bp], ax
         self.assertEqual(len(disc.alias_risks), 1)
@@ -207,10 +228,23 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(len(disc.unproven), 1)
         self.assertTrue(any("handler" in text and "unproven" in text for _cs, _ip, text in disc.indirect))
 
+    def test_jump_between_ah_load_and_handler_install_marks_handler_unproven(self):
+        code = bytearray(0x30)
+        code[0x00:0x02] = bytes.fromhex("720e")                            # jc 0010
+        code[0x02:0x0B] = bytes.fromhex("b425" "0e1f" "ba2000" "cd21")     # mov ah, 25h / push cs / pop ds / mov dx, 0020 / int 21h
+        code[0x0B:0x0F] = EXIT
+        code[0x10:0x14] = bytes.fromhex("b430" "ebf0")                     # mov ah, 30h / jmp 0004, a different DOS service
+        code[0x20] = 0xCF
+        disc = explore(code)
+        self.assertEqual(len(disc.unproven), 1)
+
     def test_memory_destination_without_access_flags_is_treated_as_written(self):
         mem = types.SimpleNamespace(type=discover.x86.X86_OP_MEM, access=0)
+        reg = types.SimpleNamespace(type=discover.x86.X86_OP_REG, access=0)
         self.assertEqual(len(discover.Discovery.stored_operands(types.SimpleNamespace(mnemonic="mov", operands=[mem]))), 1)
         self.assertEqual(discover.Discovery.stored_operands(types.SimpleNamespace(mnemonic="cmp", operands=[mem])), [])
+        # xchg ax, word ptr cs:[x] writes memory through its second operand.
+        self.assertEqual(len(discover.Discovery.stored_operands(types.SimpleNamespace(mnemonic="xchg", operands=[reg, mem]))), 1)
 
     def test_far_call_through_memory_is_reported_as_run_time_target(self):
         disc = explore(bytes.fromhex("ff5f10") + EXIT)  # lcall [bx + 10]

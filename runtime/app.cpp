@@ -36,6 +36,7 @@ double g_rest_x = 0, g_rest_y = 0;
 // input (a normal mouse), absolute raw input (Remote Desktop, virtual machines, some pens and touchpads), or
 // plain window messages when raw input never arrives.
 std::chrono::steady_clock::time_point g_last_raw{};
+bool g_raw_seen = false;  // once raw input has arrived, window messages never add movement again
 bool g_abs_baseline = false;
 bool g_raw_absolute = false;
 double g_last_abs_x = 0, g_last_abs_y = 0;
@@ -115,6 +116,13 @@ void capture_pointer(HWND hwnd, bool on) {
     g_have_last_client = false;
     g_abs_baseline = false;
     if (!on) { ClipCursor(nullptr); return; }
+    // The captured position starts where the pointer is.
+    POINT p;
+    if (g_presenter && g_machine && GetCursorPos(&p) && ScreenToClient(hwnd, &p)) {
+        const RECT pr = g_presenter->picture_rect();
+        g_machine->mouse.x = std::clamp(int((p.x - pr.left) * 320 / std::max<LONG>(1, pr.right - pr.left)), 0, 319);
+        g_machine->mouse.y = std::clamp(int((p.y - pr.top) * 200 / std::max<LONG>(1, pr.bottom - pr.top)), 0, 199);
+    }
     RECT r;
     GetClientRect(hwnd, &r);
     MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&r), 2);
@@ -138,6 +146,10 @@ void add_motion(double px, double py) {
     g_rest_y -= my;
     g_machine->mouse.dx += mx;
     g_machine->mouse.dy += my;
+    // While the mouse is captured the absolute position is built from the same movement, so moving the
+    // pointer back to the centre of the window never moves the cursor of a game that reads positions.
+    g_machine->mouse.x = std::clamp(g_machine->mouse.x + mx, 0, 319);
+    g_machine->mouse.y = std::clamp(g_machine->mouse.y + my, 0, 199);
 }
 
 void raw_mouse(LPARAM lp) {
@@ -150,6 +162,7 @@ void raw_mouse(LPARAM lp) {
     if (!(rm.usFlags & MOUSE_MOVE_ABSOLUTE)) {
         if (rm.lLastX == 0 && rm.lLastY == 0) return;
         g_last_raw = std::chrono::steady_clock::now();
+        g_raw_seen = true;
         g_raw_absolute = false;
         note_source("relative raw input");
         add_motion(rm.lLastX, rm.lLastY);
@@ -161,6 +174,7 @@ void raw_mouse(LPARAM lp) {
     const double h = GetSystemMetrics(desktop ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
     const double x = rm.lLastX * w / 65535.0, y = rm.lLastY * h / 65535.0;
     g_last_raw = std::chrono::steady_clock::now();
+    g_raw_seen = true;
     g_raw_absolute = true;
     note_source("absolute raw input");
     if (g_abs_baseline) add_motion(x - g_last_abs_x, y - g_last_abs_y);
@@ -175,7 +189,8 @@ void message_mouse(HWND hwnd, LPARAM lp) {
     if (!g_captured || g_scripted) return;
     const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     const bool raw_active = std::chrono::steady_clock::now() - g_last_raw < std::chrono::milliseconds(300);
-    if (!raw_active && g_have_last_client) {
+    // Once raw input has arrived it carries every movement, so a window message never adds the same one again.
+    if (!g_raw_seen && g_have_last_client) {
         if (p.x != g_last_client.x || p.y != g_last_client.y) note_source("window messages");
         add_motion(p.x - g_last_client.x, p.y - g_last_client.y);
     }
@@ -196,7 +211,7 @@ void message_mouse(HWND hwnd, LPARAM lp) {
 }
 
 void mouse_to_game(LPARAM lp) {
-    if (!g_presenter || !g_machine || g_scripted) return;
+    if (!g_presenter || !g_machine || g_scripted || g_captured) return;  // while captured, movement sets the position
     const RECT r = g_presenter->picture_rect();
     const int w = std::max<LONG>(1, r.right - r.left), h = std::max<LONG>(1, r.bottom - r.top);
     const int x = (GET_X_LPARAM(lp) - r.left) * 320 / w, y = (GET_Y_LPARAM(lp) - r.top) * 200 / h;

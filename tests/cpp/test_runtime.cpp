@@ -216,6 +216,14 @@ const std::vector<Test> kTests = {
          const int64_t until = audio.next_until(base + audio.latency() - span * 8, 512);
          return until < base + span && until >= base + span - span / 4;
      }},
+    {"audio_clock_running_behind_is_pulled_forward_gently", [] {
+         nax::Audio audio;
+         const int64_t base = audio.render_time();
+         const int64_t span = audio.next_until(base + audio.latency(), 512) - base;
+         // The sound card has fallen two buffers behind the system clock. There is no dead band for a lag.
+         const int64_t until = audio.next_until(base + audio.latency() + span * 3, 512);
+         return until > base + span && until <= base + span + span / 4;
+     }},
     {"audio_catches_up_after_a_stall_instead_of_squeezing_it_into_one_buffer", [] {
          nax::Audio audio;
          const int64_t base = audio.render_time();

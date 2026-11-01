@@ -41,6 +41,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return events_.size();
     }
+    // Returns the last value queued for an OPL register, for the tests.
+    bool queued_register(uint8_t reg, uint8_t* value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = events_.rbegin(); it != events_.rend(); ++it)
+            if (it->kind == 0 && it->a == reg) { *value = uint8_t(it->b); return true; }
+        return false;
+    }
     // Lets the tests queue events without a sound device.
     void accept_events_for_test() { accepting_ = true; }
     static constexpr size_t kMaxEvents = 65536;

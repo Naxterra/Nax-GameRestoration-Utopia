@@ -77,8 +77,8 @@ void Machine::set_folders(const std::filesystem::path& data, const std::filesyst
     for (; !ec && it != end; it.increment(ec)) {
         if (it->path().filename().wstring().find(L".nax-tmp") == std::wstring::npos) continue;
         std::error_code remove_ec;
-        std::filesystem::remove(it->path(), remove_ec);
-        log("Removed an unfinished file left by an earlier session");
+        if (std::filesystem::remove(it->path(), remove_ec)) log("Removed an unfinished file left by an earlier session");
+        else log("Could not remove an unfinished file left by an earlier session");
     }
 }
 

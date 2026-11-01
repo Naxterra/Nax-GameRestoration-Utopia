@@ -46,7 +46,9 @@ bool wildcard_match(const std::string& pattern, const std::string& name) {
 bool safe_part(const std::string& part) {
     for (unsigned char ch : part)
         if (ch < 32 || ch >= 127 || std::strchr("<>:\"|?*", ch)) return false;
-    const std::string base = lower(part.substr(0, part.find('.')));
+    std::string base = lower(part.substr(0, part.find('.')));
+    // Windows also treats "CON .DAT" as the console, so spaces before the extension are ignored here too.
+    while (!base.empty() && base.back() == ' ') base.pop_back();
     static const char* devices[] = {"con", "prn", "aux", "nul", "clock$"};
     for (const char* d : devices)
         if (base == d) return false;
@@ -415,18 +417,24 @@ void Machine::int21() {
             const size_t slash = pattern.rfind('/');
             const std::string dir = slash == std::string::npos ? std::string() : pattern.substr(0, slash);
             const std::string mask = slash == std::string::npos ? pattern : pattern.substr(slash + 1);
-            std::string base = dir.empty() ? cwd_ : (cwd_.empty() ? dir : cwd_ + "/" + dir);
-            // A search may only look inside the game folder, under the same rule as file names.
+            // A leading slash starts at the game folder, as in resolve(). The folder is then built part by part,
+            // so a rooted or network path can never replace the game folder, and every part follows the same
+            // rule as file names.
+            const std::string base = (!dir.empty() && dir[0] == '/') ? dir : (cwd_.empty() ? dir : cwd_ + "/" + dir);
+            std::filesystem::path rel;
             for (size_t from = 0; from <= base.size();) {
                 const size_t to = base.find('/', from);
-                const std::string part = base.substr(from, to == std::string::npos ? std::string::npos : to - from);
+                std::string part = base.substr(from, to == std::string::npos ? std::string::npos : to - from);
+                if (part != "." && part != "..")
+                    while (!part.empty() && (part.back() == ' ' || part.back() == '.')) part.pop_back();
                 if (part == ".." || (!part.empty() && part != "." && !safe_part(part))) { dos_error(3); return; }
+                if (!part.empty() && part != ".") rel /= std::filesystem::path(lower(part));
                 if (to == std::string::npos) break;
                 from = to + 1;
             }
             for (const auto& root : {save_dir_ / L"files", data_dir_}) {
                 std::error_code ec;
-                const auto folder = base.empty() ? root : root / std::filesystem::path(lower(base));
+                const auto folder = root / rel;
                 std::filesystem::directory_iterator it(folder, ec), end;
                 for (; !ec && it != end; it.increment(ec)) {
                     const auto& entry = *it;

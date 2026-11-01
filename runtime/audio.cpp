@@ -40,12 +40,17 @@ Audio::Audio() {
 Audio::~Audio() { stop(); }
 
 int64_t Audio::next_until(int64_t now_ticks, int samples) const {
-    const int64_t target = render_time_ + int64_t(samples) * freq_ / Opl2::kRate;
+    const int64_t span = int64_t(samples) * freq_ / Opl2::kRate;
+    const int64_t target = render_time_ + span;
     const int64_t real = now_ticks - latency_;
-    // Small differences between the sound card's clock and the system clock are absorbed by the latency.
     // After a stall of more than a quarter of a second the output catches up at once; render() then applies
     // the missed register writes silently instead of squeezing them into one buffer.
-    return (real - target > freq_ / 4 || target - real > freq_ / 4) ? std::max(real, render_time_) : target;
+    if (real - target > freq_ / 4) return real;
+    // Otherwise the sound card's clock is pulled gently towards the system clock: each buffer corrects an
+    // eighth of the difference, at most a quarter of its length, so the output never runs ahead of the
+    // register writes and never jumps.
+    const int64_t correction = std::clamp((real - target) / 8, -span / 4, span / 4);
+    return std::max(render_time_, target + correction);
 }
 
 int64_t Audio::now() const {

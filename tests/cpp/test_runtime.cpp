@@ -130,7 +130,7 @@ const std::vector<Test> kTests = {
      }},
     {"names_with_colons_devices_or_parent_folders_are_refused", [] {
          Fixture f;
-         const char* bad[] = {"DIR\\E:X", "SAVE.DAT:STREAM", "CON", "con.txt", "CON ", "CON.", "LPT1", "..\\OUTSIDE.DAT", "SCENARIO\\..\\..\\X"};
+         const char* bad[] = {"DIR\\E:X", "SAVE.DAT:STREAM", "CON", "con.txt", "CON ", "CON.", "CON .DAT", "LPT1", "..\\OUTSIDE.DAT", "SCENARIO\\..\\..\\X"};
          for (const char* name : bad)
              if (f.open(name, 0x3C, 0) >= 0) return false;
          return no_temporary_files(f.saves) && !fs::exists(f.root / L"outside.dat");
@@ -146,10 +146,17 @@ const std::vector<Test> kTests = {
              f.m.service_for_test(0x21);
              return !f.m.c.cf;
          };
-         const char* outside[] = {"..\\*.*", "E:X\\*.*", "SUB\\..\\..\\*.*"};
-         for (const char* p : outside)
-             if (call(0x4E, p)) return false;
-         return !call(0x3B, "E:X") && !call(0x3B, "CON");
+         // A parent folder or a colon inside the path is refused by the safety rule (DOS error 3, path not found),
+         // not merely because a folder is missing (which would give error 18, no more files).
+         const char* refused[] = {"..\\*.*", "SUB\\..\\..\\*.*", "A\\E:X\\*.*", "A\\CON\\*.*"};
+         for (const char* p : refused)
+             if (call(0x4E, p) || f.m.c.a.x != 3) return false;
+         // A leading backslash, with or without a drive letter, and a network path all stay inside the game folder.
+         write_file(f.data / L"x" / L"inside.dat", "game");
+         if (!call(0x4E, "\\X\\*.*") || !call(0x4E, "C:\\X\\*.*")) return false;
+         if (call(0x4E, "\\\\SRV\\SHARE\\*.*")) return false;
+         fs::create_directories(f.data / L"a");
+         return !call(0x3B, "A\\E:X") && !call(0x3B, "CON");
      }},
     {"name_with_trailing_space_opens_the_file_as_on_dos", [] {
          Fixture f;
@@ -188,7 +195,19 @@ const std::vector<Test> kTests = {
              audio.opl_data(uint8_t(i));
          }
          const size_t queued = audio.queued_events();
-         return queued < nax::Audio::kMaxEvents && queued >= 256;
+         uint8_t key = 0, fnum = 0;
+         const bool restored = audio.queued_register(0xB0, &key) && audio.queued_register(0xA0, &fnum);
+         return queued < nax::Audio::kMaxEvents && queued >= 256 && restored && key == 0x31 &&
+                fnum == uint8_t(nax::Audio::kMaxEvents + 9);
+     }},
+    {"audio_clock_running_ahead_is_slowed_gently_without_jumping", [] {
+         nax::Audio audio;
+         const int64_t base = audio.render_time();
+         const int64_t span = audio.next_until(base + audio.latency(), 512) - base;
+         // The sound card has run 50 ms ahead of the system clock.
+         const int64_t now = base + audio.latency() - span * 5;
+         const int64_t until = audio.next_until(now, 512);
+         return until >= base && until < base + span && until >= base + span - span / 4;
      }},
     {"audio_catches_up_after_a_stall_instead_of_squeezing_it_into_one_buffer", [] {
          nax::Audio audio;

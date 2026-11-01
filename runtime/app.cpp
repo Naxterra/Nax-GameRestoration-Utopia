@@ -274,6 +274,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         MessageBoxW(nullptr, text.c_str(), game::title(), MB_ICONERROR);
         return 1;
     }
+    // One copy of a game at a time: a second copy sharing the save folder could remove the first copy's
+    // unfinished files at start, or replace a save the first copy is writing.
+    const std::wstring mutex_name = std::wstring(L"Local\\NaxGameRestoration-") + game::data_folder_name();
+    HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, mutex_name.c_str());
+    if (!instance_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(nullptr, L"The game is already running.", game::title(), MB_ICONINFORMATION);
+        return 1;
+    }
     wchar_t local[MAX_PATH] = L".";
     GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
     const std::filesystem::path saves = std::filesystem::path(local) / L"Nax Game Restoration" / game::data_folder_name();

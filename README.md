@@ -32,7 +32,7 @@ The script translates the original program files into `generated\utopia` and com
 
 ## Playing
 
-Start `build\utopia\Utopia.exe`. While the window is active, the mouse controls the game and the Windows pointer stays inside the window; Alt+Tab releases it. Alt+Enter switches between a window and borderless fullscreen, and F12 saves a screenshot.
+Start `build\utopia\Utopia.exe`. While the window is active, the mouse controls the game and the Windows pointer stays inside the window; Alt+Tab releases it. Alt+Enter switches between a window and borderless fullscreen. F11 switches between three picture filters: sharp pixels, smooth edges (stair steps along diagonal and round edges are redrawn as smooth lines) and a CRT look with scanlines; the choice is remembered for the next start. F12 saves a screenshot exactly as the picture appears on screen.
 
 Utopia does not play music on its own. On the options screen, click the disk button with the note, choose one of the four tunes, and use the note button to switch the music on and off.
 
@@ -44,6 +44,7 @@ Utopia does not play music on its own. On the options screen, click the disk but
 | `--mute` | No sound output. |
 | `--language en`, `fr`, `de` or `it` | The language of the game's texts. |
 | `--skip-intro` | Starts the game without the intro. |
+| `--filter sharp`, `smooth` or `crt` | The picture filter for this start, instead of the one last chosen with F11. |
 | `--data <folder>` | Uses the game files in another folder. |
 
 ## Where files go

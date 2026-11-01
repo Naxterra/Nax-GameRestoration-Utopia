@@ -1,6 +1,7 @@
 // The Windows program: window, input, presentation and the thread the translated game runs on.
 //
 // Options: --data <folder> (the game files), --sound adlib|beeper|roland, --language en|fr|de|it, --skip-intro, --mute,
+// --filter sharp|smooth|crt,
 // and for automated checks --script <file>, --shot-every <ms> and --quit-after <ms>.
 #include <windows.h>
 #include <shellapi.h>
@@ -36,7 +37,29 @@ double g_rest_x = 0, g_rest_y = 0;
 // input (a normal mouse), absolute raw input (Remote Desktop, virtual machines, some pens and touchpads), or
 // plain window messages when raw input never arrives.
 std::chrono::steady_clock::time_point g_last_raw{};
-bool g_raw_seen = false;  // once raw input has arrived, window messages never add movement again
+double g_pending_x = 0, g_pending_y = 0;  // movement from window messages, held back until raw input stays away
+std::chrono::steady_clock::time_point g_pending_since{};
+int g_filter = 0;
+bool g_shot_requested = false;
+std::filesystem::path g_settings;
+std::filesystem::path g_error_file;
+
+// Shows an error to the player. During a scripted check nobody watches the screen, so the message goes to
+// last-error.txt in the save folder instead of a dialog that would wait for a click.
+void report_error(const std::wstring& text, const wchar_t* caption) {
+    if (g_scripted && !g_error_file.empty()) {
+        if (FILE* f = _wfopen(g_error_file.c_str(), L"w")) {
+            std::fwprintf(f, L"%ls\n", text.c_str());
+            std::fclose(f);
+        }
+        return;
+    }
+    MessageBoxW(nullptr, text.c_str(), caption, MB_ICONERROR);
+}
+
+std::wstring widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+const wchar_t* const kFilterNames[nax::Presenter::kFilterCount] = {L"sharp", L"smooth", L"crt"};
+const wchar_t* const kFilterTitles[nax::Presenter::kFilterCount] = {L"sharp pixels", L"smooth edges", L"CRT"};
 bool g_abs_baseline = false;
 bool g_raw_absolute = false;
 double g_last_abs_x = 0, g_last_abs_y = 0;
@@ -80,15 +103,31 @@ void build_frame(nax::Machine& m, std::vector<uint32_t>& out) {
     }
 }
 
-void save_shot() {
-    if (!g_machine || g_shots.empty()) return;
-    std::vector<uint32_t> frame;
-    build_frame(*g_machine, frame);
-    std::error_code ec;
-    std::filesystem::create_directories(g_shots, ec);
-    wchar_t name[32];
-    swprintf(name, 32, L"shot-%04d.png", g_shot_number++);
-    nax::write_png(g_shots / name, frame.data(), nax::Presenter::kWidth, nax::Presenter::kHeight, 2);
+// The next frame is saved as it appears on screen, with the current filter.
+void save_shot() { g_shot_requested = true; }
+
+void show_filter(HWND hwnd) {
+    std::wstring title = game::title();
+    title += L"  [";
+    title += kFilterTitles[g_filter];
+    title += L"]";
+    SetWindowTextW(hwnd, title.c_str());
+}
+
+// Switches to the next filter and remembers the choice for the next start.
+void next_filter(HWND hwnd) {
+    g_filter = (g_filter + 1) % nax::Presenter::kFilterCount;
+    show_filter(hwnd);
+    if (FILE* f = _wfopen(g_settings.c_str(), L"w")) {
+        std::fwprintf(f, L"filter=%ls\n", kFilterNames[g_filter]);
+        std::fclose(f);
+    }
+}
+
+int filter_from_name(const std::wstring& name) {
+    for (int i = 0; i < nax::Presenter::kFilterCount; i++)
+        if (name == kFilterNames[i]) return i;
+    return -1;
 }
 
 void toggle_fullscreen(HWND hwnd) {
@@ -112,16 +151,22 @@ void toggle_fullscreen(HWND hwnd) {
 // reaches the game. Switching to another window releases it.
 void capture_pointer(HWND hwnd, bool on) {
     if (g_scripted) on = false;
+    const bool starting = on && !g_captured;
     g_captured = on;
     g_have_last_client = false;
     g_abs_baseline = false;
+    g_pending_x = g_pending_y = 0;
     if (!on) { ClipCursor(nullptr); return; }
-    // The captured position starts where the pointer is.
+    // When capture begins, the position starts where the pointer is, provided it is inside the window. Renewing
+    // the capture after a move, a resize or Alt+Enter keeps the position, because the pointer is unrelated to
+    // it while captured.
     POINT p;
-    if (g_presenter && g_machine && GetCursorPos(&p) && ScreenToClient(hwnd, &p)) {
+    RECT client;
+    GetClientRect(hwnd, &client);
+    if (starting && g_presenter && g_machine && GetCursorPos(&p) && ScreenToClient(hwnd, &p) && PtInRect(&client, p)) {
         const RECT pr = g_presenter->picture_rect();
-        g_machine->mouse.x = std::clamp(int((p.x - pr.left) * 320 / std::max<LONG>(1, pr.right - pr.left)), 0, 319);
-        g_machine->mouse.y = std::clamp(int((p.y - pr.top) * 200 / std::max<LONG>(1, pr.bottom - pr.top)), 0, 199);
+        g_machine->mouse_place(int((p.x - pr.left) * 320 / std::max<LONG>(1, pr.right - pr.left)),
+                               int((p.y - pr.top) * 200 / std::max<LONG>(1, pr.bottom - pr.top)));
     }
     RECT r;
     GetClientRect(hwnd, &r);
@@ -144,12 +189,24 @@ void add_motion(double px, double py) {
     const int mx = int(g_rest_x), my = int(g_rest_y);
     g_rest_x -= mx;
     g_rest_y -= my;
-    g_machine->mouse.dx += mx;
-    g_machine->mouse.dy += my;
     // While the mouse is captured the absolute position is built from the same movement, so moving the
     // pointer back to the centre of the window never moves the cursor of a game that reads positions.
-    g_machine->mouse.x = std::clamp(g_machine->mouse.x + mx, 0, 319);
-    g_machine->mouse.y = std::clamp(g_machine->mouse.y + my, 0, 199);
+    g_machine->mouse_motion(mx, my);
+}
+
+// Applies movement from window messages once no raw input has followed it for a moment; raw input for the
+// same movement replaces it instead, so nothing is counted twice.
+void flush_pending_motion() {
+    if (g_pending_x == 0 && g_pending_y == 0) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_pending_since < std::chrono::milliseconds(40)) return;
+    if (g_last_raw >= g_pending_since) {
+        g_pending_x = g_pending_y = 0;
+        return;
+    }
+    note_source("window messages");
+    add_motion(g_pending_x, g_pending_y);
+    g_pending_x = g_pending_y = 0;
 }
 
 void raw_mouse(LPARAM lp) {
@@ -162,7 +219,6 @@ void raw_mouse(LPARAM lp) {
     if (!(rm.usFlags & MOUSE_MOVE_ABSOLUTE)) {
         if (rm.lLastX == 0 && rm.lLastY == 0) return;
         g_last_raw = std::chrono::steady_clock::now();
-        g_raw_seen = true;
         g_raw_absolute = false;
         note_source("relative raw input");
         add_motion(rm.lLastX, rm.lLastY);
@@ -174,7 +230,6 @@ void raw_mouse(LPARAM lp) {
     const double h = GetSystemMetrics(desktop ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
     const double x = rm.lLastX * w / 65535.0, y = rm.lLastY * h / 65535.0;
     g_last_raw = std::chrono::steady_clock::now();
-    g_raw_seen = true;
     g_raw_absolute = true;
     note_source("absolute raw input");
     if (g_abs_baseline) add_motion(x - g_last_abs_x, y - g_last_abs_y);
@@ -189,10 +244,12 @@ void message_mouse(HWND hwnd, LPARAM lp) {
     if (!g_captured || g_scripted) return;
     const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     const bool raw_active = std::chrono::steady_clock::now() - g_last_raw < std::chrono::milliseconds(300);
-    // Once raw input has arrived it carries every movement, so a window message never adds the same one again.
-    if (!g_raw_seen && g_have_last_client) {
-        if (p.x != g_last_client.x || p.y != g_last_client.y) note_source("window messages");
-        add_motion(p.x - g_last_client.x, p.y - g_last_client.y);
+    // While raw input arrives it carries every movement. Otherwise the movement is held back briefly, so that
+    // raw input for the same movement can still replace it.
+    if (!raw_active && g_have_last_client && (p.x != g_last_client.x || p.y != g_last_client.y)) {
+        if (g_pending_x == 0 && g_pending_y == 0) g_pending_since = std::chrono::steady_clock::now();
+        g_pending_x += p.x - g_last_client.x;
+        g_pending_y += p.y - g_last_client.y;
     }
     g_last_client = p;
     g_have_last_client = true;
@@ -242,7 +299,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         [[fallthrough]];
     case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYUP: {
         const bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-        if (wp == VK_F12 && down) { save_shot(); return 0; }
+        if (wp == VK_F12) { if (down) save_shot(); return 0; }
+        if (wp == VK_F11) { if (down && !(lp & (1 << 30))) next_filter(hwnd); return 0; }
         if (g_machine) g_machine->key_event(uint8_t((lp >> 16) & 0x7F), (lp >> 24) & 1, down);
         return 0;
     }
@@ -359,7 +417,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::wstring text = L"The game files were not found. Start the program with --data <folder>, where the folder holds ";
         text += game::required_file();
         text += L" and the other files of your copy of the game.";
-        MessageBoxW(nullptr, text.c_str(), game::title(), MB_ICONERROR);
+        report_error(text, game::title());
         return 1;
     }
     // One copy of a game at a time: a second copy sharing the save folder could remove the first copy's
@@ -375,6 +433,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
     const std::filesystem::path saves = std::filesystem::path(local) / L"Nax Game Restoration" / game::data_folder_name();
     g_shots = saves / L"shots";
+    g_settings = saves / L"settings.ini";
+    g_error_file = saves / L"last-error.txt";
+    {
+        // The last filter chosen with F11 is kept; --filter overrides it for one start.
+        std::error_code ec;
+        std::filesystem::create_directories(saves, ec);
+        wchar_t line[64] = L"";
+        if (FILE* f = _wfopen(g_settings.c_str(), L"r")) {
+            if (std::fgetws(line, 64, f)) {
+                std::wstring text = line;
+                while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) text.pop_back();
+                if (text.rfind(L"filter=", 0) == 0 && filter_from_name(text.substr(7)) >= 0) g_filter = filter_from_name(text.substr(7));
+            }
+            std::fclose(f);
+        }
+        if (options.count(L"filter") && filter_from_name(options.at(L"filter")) >= 0) g_filter = filter_from_name(options.at(L"filter"));
+    }
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = window_proc;
@@ -390,10 +465,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     nax::Presenter presenter;
     std::string error;
     if (!presenter.init(g_hwnd, &error)) {
-        MessageBoxA(nullptr, ("Direct3D 12 could not start: " + error).c_str(), "Nax Game Restoration", MB_ICONERROR);
+        report_error(widen("Direct3D 12 could not start: " + error), L"Nax Game Restoration");
         return 1;
     }
     g_presenter = &presenter;
+    show_filter(g_hwnd);
     RAWINPUTDEVICE mouse_device{0x01, 0x02, 0, g_hwnd};
     RegisterRawInputDevices(&mouse_device, 1, sizeof(mouse_device));
     ShowWindow(g_hwnd, show);
@@ -438,8 +514,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             next_shot += std::chrono::milliseconds(shot_every);
         }
         if (quit_after > 0 && now - start > std::chrono::milliseconds(quit_after)) machine.request_stop();
+        flush_pending_motion();
         build_frame(machine, frame);
-        presenter.draw(frame.data());
+        std::filesystem::path shot;
+        if (g_shot_requested) {
+            g_shot_requested = false;
+            std::error_code ec;
+            std::filesystem::create_directories(g_shots, ec);
+            wchar_t name[32];
+            swprintf(name, 32, L"shot-%04d.png", g_shot_number++);
+            shot = g_shots / name;
+        }
+        presenter.draw(frame.data(), g_filter, shot.empty() ? nullptr : &shot);
     }
     machine.request_stop();
     game_thread.join();
@@ -449,7 +535,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     g_machine = nullptr;
     g_presenter = nullptr;
     if (!machine.failure().empty()) {
-        MessageBoxA(nullptr, machine.failure().c_str(), "Nax Game Restoration", MB_ICONERROR);
+        report_error(widen(machine.failure()), L"Nax Game Restoration");
         return 2;
     }
     return 0;

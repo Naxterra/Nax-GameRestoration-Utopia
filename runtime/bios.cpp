@@ -111,6 +111,18 @@ void Machine::int1a() {
     }
 }
 
+void Machine::mouse_place(int x, int y) {
+    const int div = video_mode == 0x13 ? 2 : 1;  // the 256-colour mode counts 640 virtual columns
+    mouse.x = std::clamp(x, std::max(0, mouse_min_x_ / div), std::min(319, mouse_max_x_ / div));
+    mouse.y = std::clamp(y, std::max(0, mouse_min_y_), std::min(199, mouse_max_y_));
+}
+
+void Machine::mouse_motion(int dx, int dy) {
+    mouse.dx += dx;
+    mouse.dy += dy;
+    mouse_place(mouse.x + dx, mouse.y + dy);
+}
+
 void Machine::int33() {
     auto virtual_x = [&] {
         const int x = mouse.x * (video_mode == 0x13 ? 2 : 1);

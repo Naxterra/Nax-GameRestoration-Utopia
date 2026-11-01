@@ -125,6 +125,11 @@ public:
     int cursor_hot_x = 0, cursor_hot_y = 0;
     bool custom_cursor = false;
     void key_event(uint8_t scancode, bool extended, bool down);
+    // Adds mouse movement in game pixels to the motion counters and to the position, which stays inside the
+    // range the game set, as a DOS mouse driver keeps it.
+    void mouse_motion(int dx, int dy);
+    // Places the mouse at a position in game pixels, inside the game's range.
+    void mouse_place(int x, int y);
     const uint8_t* vram() const { return &mem[0xA0000]; }
 
 private:

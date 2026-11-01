@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
+
+#include "png.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -11,13 +14,18 @@ namespace nax {
 
 namespace {
 
-// A full-screen triangle samples the picture with "sharp bilinear" filtering: each source pixel is first
-// enlarged by the largest whole factor and only the remaining fraction is blended, which keeps pixels crisp
-// at any window size without the uneven widths of nearest-neighbour scaling.
+// A full-screen triangle draws the 320x200 picture with one of three filters, chosen by "mode":
+//   0  Sharp pixels: each source pixel is enlarged by the largest whole factor and only the remaining fraction
+//      is blended ("sharp bilinear"), which keeps pixels crisp at any window size.
+//   1  Smooth edges: the EPX rule (also known as Scale2x) is applied twice, giving a picture four times as large
+//      in which stair steps along diagonal and round edges become smooth lines while flat areas stay unchanged.
+//   2  CRT: the picture as a colour monitor of the time showed it, with visible scanlines, a slight glow
+//      between them and an aperture grille, computed in linear light.
 const char kShader[] = R"(
-cbuffer Scale : register(b0) { float2 scale; };
+cbuffer Params : register(b0) { float2 scale; uint mode; uint unused; };
 Texture2D picture : register(t0);
 SamplerState smooth : register(s0);
+static const float2 size = float2(320, 200);
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 V vs(uint id : SV_VertexID) {
     V o;
@@ -26,15 +34,69 @@ V vs(uint id : SV_VertexID) {
     o.pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
     return o;
 }
-float4 ps(V i) : SV_Target {
-    const float2 size = float2(320, 200);
-    float2 texel = i.uv * size;
+
+float3 sharp(float2 uv) {
+    float2 texel = uv * size;
     float2 whole = max(floor(scale), 1);
     float2 base = floor(texel);
     float2 dist = frac(texel) - 0.5;
     float2 range = 0.5 - 0.5 / whole;
     float2 f = (dist - clamp(dist, -range, range)) * whole + 0.5;
-    return picture.Sample(smooth, (base + f) / size);
+    return picture.SampleLevel(smooth, (base + f) / size, 0).rgb;
+}
+
+float3 texel(int2 p) { return picture.Load(int3(clamp(p, int2(0, 0), int2(319, 199)), 0)).rgb; }
+bool same(float3 a, float3 b) { return all(abs(a - b) < 0.002); }
+
+// One EPX step: the quarter q of pixel P, from its neighbours above (A), right (B), left (C) and below (D).
+float3 epx(float3 P, float3 A, float3 B, float3 C, float3 D, int2 q) {
+    if (q.x == 0 && q.y == 0) return (same(C, A) && !same(C, D) && !same(A, B)) ? A : P;
+    if (q.x == 1 && q.y == 0) return (same(A, B) && !same(A, C) && !same(B, D)) ? B : P;
+    if (q.x == 0 && q.y == 1) return (same(D, C) && !same(D, B) && !same(C, A)) ? C : P;
+    return (same(B, D) && !same(B, A) && !same(D, C)) ? D : P;
+}
+float3 double_size(int2 p2) {
+    int2 p = p2 >> 1;
+    return epx(texel(p), texel(p + int2(0, -1)), texel(p + int2(1, 0)), texel(p + int2(-1, 0)), texel(p + int2(0, 1)), p2 & 1);
+}
+float3 smooth_edges(float2 uv) {
+    int2 p4 = clamp(int2(floor(uv * size * 4)), int2(0, 0), int2(1279, 799));
+    int2 p2 = p4 >> 1;
+    return epx(double_size(p2), double_size(p2 + int2(0, -1)), double_size(p2 + int2(1, 0)), double_size(p2 + int2(-1, 0)),
+               double_size(p2 + int2(0, 1)), p4 & 1);
+}
+
+float3 to_linear(float3 c) { return pow(max(c, 0), 2.4); }
+float3 row_colour(float x, float row) {
+    // Horizontally the beam blends neighbouring pixels a little; the sharp-bilinear rule keeps that slight.
+    float whole = max(floor(scale.x), 1);
+    float base = floor(x);
+    float dist = frac(x) - 0.5;
+    float range = 0.5 - 0.75 / whole;
+    float f = (dist - clamp(dist, -range, range)) * whole + 0.5;
+    return to_linear(picture.SampleLevel(smooth, float2((base + f) / size.x, (clamp(row, 0, 199) + 0.5) / size.y), 0).rgb);
+}
+float3 crt(float2 uv, float2 pos) {
+    float2 src = uv * size;
+    float y = src.y - 0.5;
+    float row = floor(y);
+    float f = y - row;
+    float3 a = row_colour(src.x, row), b = row_colour(src.x, row + 1);
+    // Each scanline is a beam with a Gaussian profile; bright lines are a little wider, as on a real tube.
+    float3 wa = exp(-pow(f / (0.30 + 0.12 * a), 2) * 0.5);
+    float3 wb = exp(-pow((1 - f) / (0.30 + 0.12 * b), 2) * 0.5);
+    float3 c = a * wa + b * wb;
+    if (scale.x >= 3) {
+        uint m = uint(pos.x) % 3;
+        c *= float3(m == 0 ? 1.20 : 0.80, m == 1 ? 1.20 : 0.80, m == 2 ? 1.20 : 0.80);
+    }
+    return pow(saturate(c * 1.35), 1 / 2.2);
+}
+
+float4 ps(V i) : SV_Target {
+    if (mode == 1) return float4(smooth_edges(i.uv), 1);
+    if (mode == 2) return float4(crt(i.uv, i.pos.xy), 1);
+    return float4(sharp(i.uv), 1);
 }
 )";
 
@@ -113,7 +175,7 @@ bool Presenter::init(HWND hwnd, std::string* error) {
     range.NumDescriptors = 1;
     D3D12_ROOT_PARAMETER params[2]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.Num32BitValues = 2;
+    params[0].Constants.Num32BitValues = 4;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[1].DescriptorTable.NumDescriptorRanges = 1;
@@ -135,10 +197,16 @@ bool Presenter::init(HWND hwnd, std::string* error) {
         return false;
 
     ComPtr<ID3DBlob> vs, ps;
-    if (!check(D3DCompile(kShader, sizeof(kShader) - 1, "picture", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &vs, &errors), "Compiling the vertex shader", error))
+    // A failed compile reports the compiler's own message, so the cause is visible without a debugger.
+    auto compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>* out, const char* what) {
+        errors.Reset();
+        if (check(D3DCompile(kShader, sizeof(kShader) - 1, "picture", nullptr, nullptr, entry, target, 0, 0, out->GetAddressOf(), &errors), what, error))
+            return true;
+        if (errors) *error += std::string(" ") + static_cast<const char*>(errors->GetBufferPointer());
         return false;
-    if (!check(D3DCompile(kShader, sizeof(kShader) - 1, "picture", nullptr, nullptr, "ps", "ps_5_0", 0, 0, &ps, &errors), "Compiling the pixel shader", error))
-        return false;
+    };
+    if (!compile("vs", "vs_5_0", &vs, "Compiling the vertex shader")) return false;
+    if (!compile("ps", "ps_5_0", &ps, "Compiling the pixel shader")) return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = root_.Get();
     pd.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
@@ -239,7 +307,7 @@ RECT Presenter::picture_rect() const {
     return r;
 }
 
-void Presenter::draw(const uint32_t* rgba) {
+void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::path* capture) {
     if (!swap_ || width_ == 0) return;
     const UINT i = swap_->GetCurrentBackBufferIndex();
     if (fence_->GetCompletedValue() < fence_values_[i]) {
@@ -282,19 +350,84 @@ void Presenter::draw(const uint32_t* rgba) {
     list_->SetGraphicsRootSignature(root_.Get());
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get()};
     list_->SetDescriptorHeaps(1, heaps);
-    const float scale[2] = {vp.Width / kWidth, vp.Height / kHeight};
-    list_->SetGraphicsRoot32BitConstants(0, 2, scale, 0);
+    struct {
+        float scale[2];
+        uint32_t mode, unused;
+    } params{{vp.Width / kWidth, vp.Height / kHeight}, uint32_t(filter), 0};
+    list_->SetGraphicsRoot32BitConstants(0, 4, &params, 0);
     list_->SetGraphicsRootDescriptorTable(1, srv_heap_->GetGPUDescriptorHandleForHeapStart());
     list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list_->DrawInstanced(3, 1, 0, 0);
-    const auto back = transition(targets_[i].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-    list_->ResourceBarrier(1, &back);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    if (capture) {
+        // A screenshot copies the finished frame, so it shows the picture exactly as filtered on screen.
+        const D3D12_RESOURCE_DESC desc = targets_[i]->GetDesc();
+        UINT64 total = 0;
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+        if (!readback_ || readback_size_ < total) {
+            D3D12_HEAP_PROPERTIES rh{};
+            rh.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = total;
+            rd.Height = 1;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            readback_.Reset();
+            readback_size_ = 0;
+            if (SUCCEEDED(device_->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                           IID_PPV_ARGS(&readback_))))
+                readback_size_ = total;
+        }
+        if (!readback_) capture = nullptr;
+    }
+    if (capture) {
+        const auto to_copy = transition(targets_[i].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list_->ResourceBarrier(1, &to_copy);
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = targets_[i].Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION into{};
+        into.pResource = readback_.Get();
+        into.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        into.PlacedFootprint = footprint;
+        list_->CopyTextureRegion(&into, 0, 0, 0, &from, nullptr);
+        const auto back = transition(targets_[i].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+        list_->ResourceBarrier(1, &back);
+    } else {
+        const auto back = transition(targets_[i].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        list_->ResourceBarrier(1, &back);
+    }
     list_->Close();
     ID3D12CommandList* lists[] = {list_.Get()};
     queue_->ExecuteCommandLists(1, lists);
     swap_->Present(1, 0);
     fence_values_[i] = next_fence_++;
     queue_->Signal(fence_.Get(), fence_values_[i]);
+    if (capture) {
+        if (fence_->GetCompletedValue() < fence_values_[i]) {
+            fence_->SetEventOnCompletion(fence_values_[i], fence_event_);
+            WaitForSingleObject(fence_event_, INFINITE);
+        }
+        uint8_t* data = nullptr;
+        D3D12_RANGE range{0, SIZE_T(readback_size_)};
+        if (SUCCEEDED(readback_->Map(0, &range, reinterpret_cast<void**>(&data)))) {
+            const LONG w = std::max<LONG>(1, pr.right - pr.left), h = std::max<LONG>(1, pr.bottom - pr.top);
+            std::vector<uint32_t> pixels(size_t(w) * size_t(h));
+            for (LONG y = 0; y < h; y++) {
+                const uint8_t* row = data + footprint.Offset + size_t(y + pr.top) * footprint.Footprint.RowPitch;
+                for (LONG x = 0; x < w; x++) {
+                    const uint8_t* px = row + size_t(x + pr.left) * 4;  // stored as blue, green, red, alpha
+                    pixels[size_t(y) * size_t(w) + size_t(x)] = uint32_t(px[2]) | (uint32_t(px[1]) << 8) | (uint32_t(px[0]) << 16) | 0xFF000000u;
+                }
+            }
+            D3D12_RANGE none{0, 0};
+            readback_->Unmap(0, &none);
+            write_png(*capture, pixels.data(), unsigned(w), unsigned(h), 1);
+        }
+    }
 }
 
 }  // namespace nax

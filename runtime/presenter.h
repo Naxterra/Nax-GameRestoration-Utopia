@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace nax {
@@ -20,7 +21,9 @@ public:
     ~Presenter();
     bool init(HWND hwnd, std::string* error);
     void resize();
-    void draw(const uint32_t* rgba);
+    static constexpr int kFilterCount = 3;  // sharp pixels, smooth edges, CRT
+    // Draws one frame with the given filter; with a capture path it also saves the frame as a PNG file.
+    void draw(const uint32_t* rgba, int filter, const std::filesystem::path* capture = nullptr);
     // The rectangle inside the client area that shows the game picture, for mapping mouse positions.
     RECT picture_rect() const;
 
@@ -49,6 +52,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> upload_[kFrames];
     uint8_t* upload_ptr_[kFrames]{};
     bool texture_readable_ = false;
+    Microsoft::WRL::ComPtr<ID3D12Resource> readback_;
+    UINT64 readback_size_ = 0;
     UINT width_ = 0, height_ = 0;
 };
 

@@ -32,6 +32,16 @@ bool g_fullscreen = false;
 bool g_captured = false;
 bool g_scripted = false;  // a test script drives the input, so the real mouse is ignored and never captured
 double g_rest_x = 0, g_rest_y = 0;
+// Mouse movement reaches the game in one of three ways, depending on what the system delivers: relative raw
+// input (a normal mouse), absolute raw input (Remote Desktop, virtual machines, some pens and touchpads), or
+// plain window messages when raw input never arrives.
+std::chrono::steady_clock::time_point g_last_raw{};
+bool g_abs_baseline = false;
+bool g_raw_absolute = false;
+double g_last_abs_x = 0, g_last_abs_y = 0;
+POINT g_last_client{};
+bool g_have_last_client = false;
+const char* g_mouse_source = nullptr;
 WINDOWPLACEMENT g_placement{sizeof(WINDOWPLACEMENT)};
 std::filesystem::path g_shots;
 int g_shot_number = 0;
@@ -102,6 +112,8 @@ void toggle_fullscreen(HWND hwnd) {
 void capture_pointer(HWND hwnd, bool on) {
     if (g_scripted) on = false;
     g_captured = on;
+    g_have_last_client = false;
+    g_abs_baseline = false;
     if (!on) { ClipCursor(nullptr); return; }
     RECT r;
     GetClientRect(hwnd, &r);
@@ -109,20 +121,78 @@ void capture_pointer(HWND hwnd, bool on) {
     ClipCursor(&r);
 }
 
-void raw_mouse(LPARAM lp) {
-    if (!g_captured || !g_presenter || !g_machine) return;
-    RAWINPUT input;
-    UINT size = sizeof(input);
-    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) == UINT(-1)) return;
-    if (input.header.dwType != RIM_TYPEMOUSE || (input.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) return;
+void note_source(const char* source) {
+    if (g_mouse_source == source || !g_machine) return;
+    g_mouse_source = source;
+    g_machine->log("Mouse input: %s", source);
+}
+
+// Adds a movement in screen pixels, scaled so that crossing the picture moves the game cursor across it.
+void add_motion(double px, double py) {
+    if (!g_presenter || !g_machine) return;
     const RECT r = g_presenter->picture_rect();
-    g_rest_x += double(input.data.mouse.lLastX) * 320.0 / std::max<LONG>(1, r.right - r.left);
-    g_rest_y += double(input.data.mouse.lLastY) * 200.0 / std::max<LONG>(1, r.bottom - r.top);
+    g_rest_x += px * 320.0 / std::max<LONG>(1, r.right - r.left);
+    g_rest_y += py * 200.0 / std::max<LONG>(1, r.bottom - r.top);
     const int mx = int(g_rest_x), my = int(g_rest_y);
     g_rest_x -= mx;
     g_rest_y -= my;
     g_machine->mouse.dx += mx;
     g_machine->mouse.dy += my;
+}
+
+void raw_mouse(LPARAM lp) {
+    if (!g_captured) return;
+    RAWINPUT input;
+    UINT size = sizeof(input);
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) == UINT(-1)) return;
+    if (input.header.dwType != RIM_TYPEMOUSE) return;
+    const RAWMOUSE& rm = input.data.mouse;
+    if (!(rm.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+        if (rm.lLastX == 0 && rm.lLastY == 0) return;
+        g_last_raw = std::chrono::steady_clock::now();
+        g_raw_absolute = false;
+        note_source("relative raw input");
+        add_motion(rm.lLastX, rm.lLastY);
+        return;
+    }
+    // Absolute positions run from 0 to 65535 across the primary screen or the whole virtual desktop.
+    const bool desktop = rm.usFlags & MOUSE_VIRTUAL_DESKTOP;
+    const double w = GetSystemMetrics(desktop ? SM_CXVIRTUALSCREEN : SM_CXSCREEN);
+    const double h = GetSystemMetrics(desktop ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
+    const double x = rm.lLastX * w / 65535.0, y = rm.lLastY * h / 65535.0;
+    g_last_raw = std::chrono::steady_clock::now();
+    g_raw_absolute = true;
+    note_source("absolute raw input");
+    if (g_abs_baseline) add_motion(x - g_last_abs_x, y - g_last_abs_y);
+    g_last_abs_x = x;
+    g_last_abs_y = y;
+    g_abs_baseline = true;
+}
+
+// Uses window messages when no raw input has arrived recently, and keeps the pointer away from the window
+// edges, so that movement never stops at an edge while the game cursor could still move.
+void message_mouse(HWND hwnd, LPARAM lp) {
+    if (!g_captured || g_scripted) return;
+    const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    const bool raw_active = std::chrono::steady_clock::now() - g_last_raw < std::chrono::milliseconds(300);
+    if (!raw_active && g_have_last_client) {
+        if (p.x != g_last_client.x || p.y != g_last_client.y) note_source("window messages");
+        add_motion(p.x - g_last_client.x, p.y - g_last_client.y);
+    }
+    g_last_client = p;
+    g_have_last_client = true;
+    // An absolute device reports where the hand is, so moving the pointer back would not help there.
+    if (raw_active && g_raw_absolute) return;
+    RECT r;
+    GetClientRect(hwnd, &r);
+    const LONG mx = (r.right - r.left) / 8, my = (r.bottom - r.top) / 8;
+    if (p.x < r.left + mx || p.x > r.right - mx || p.y < r.top + my || p.y > r.bottom - my) {
+        POINT centre{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+        g_last_client = centre;
+        ClientToScreen(hwnd, &centre);
+        SetCursorPos(centre.x, centre.y);
+        g_abs_baseline = false;  // the jump back to the centre is not a movement
+    }
 }
 
 void mouse_to_game(LPARAM lp) {
@@ -145,7 +215,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_ACTIVATE:
         capture_pointer(hwnd, LOWORD(wp) != WA_INACTIVE && !HIWORD(wp));
-        return 0;
+        break;  // the default handling also gives the window keyboard focus
     case WM_INPUT:
         raw_mouse(lp);
         break;
@@ -165,8 +235,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE:
         mouse_to_game(lp);
+        message_mouse(hwnd, lp);
         return 0;
     case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP: {
+        // A click into the window captures the mouse even if the window was not activated before.
+        if (!g_captured && GetForegroundWindow() == hwnd) capture_pointer(hwnd, true);
         mouse_to_game(lp);
         if (g_machine && !g_scripted) g_machine->mouse.buttons = ((wp & MK_LBUTTON) ? 1 : 0) | ((wp & MK_RBUTTON) ? 2 : 0);
         if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN) SetCapture(hwnd);

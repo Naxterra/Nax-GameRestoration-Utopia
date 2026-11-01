@@ -200,14 +200,21 @@ const std::vector<Test> kTests = {
          return queued < nax::Audio::kMaxEvents && queued >= 256 && restored && key == 0x31 &&
                 fnum == uint8_t(nax::Audio::kMaxEvents + 9);
      }},
+    {"audio_queue_filled_at_once_keeps_normal_tempo", [] {
+         nax::Audio audio;
+         const int64_t base = audio.render_time();
+         const int64_t span = audio.next_until(base + audio.latency(), 512) - base;
+         // After the four queued buffers were rendered in one go, the timeline is four buffers ahead of real
+         // time. That is the intended offset, so the next buffer still covers exactly one buffer length.
+         return audio.next_until(base + audio.latency() - span * 4, 512) == base + span;
+     }},
     {"audio_clock_running_ahead_is_slowed_gently_without_jumping", [] {
          nax::Audio audio;
          const int64_t base = audio.render_time();
          const int64_t span = audio.next_until(base + audio.latency(), 512) - base;
-         // The sound card has run 50 ms ahead of the system clock.
-         const int64_t now = base + audio.latency() - span * 5;
-         const int64_t until = audio.next_until(now, 512);
-         return until >= base && until < base + span && until >= base + span - span / 4;
+         // The sound card has drifted eight buffers ahead of the system clock, beyond the queue offset.
+         const int64_t until = audio.next_until(base + audio.latency() - span * 8, 512);
+         return until < base + span && until >= base + span - span / 4;
      }},
     {"audio_catches_up_after_a_stall_instead_of_squeezing_it_into_one_buffer", [] {
          nax::Audio audio;

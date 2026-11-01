@@ -277,8 +277,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     // One copy of a game at a time: a second copy sharing the save folder could remove the first copy's
     // unfinished files at start, or replace a save the first copy is writing.
     const std::wstring mutex_name = std::wstring(L"Local\\NaxGameRestoration-") + game::data_folder_name();
+    // If the guard cannot be created at all, the game still starts; only a running copy stops it.
     HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, mutex_name.c_str());
-    if (!instance_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (instance_mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"The game is already running.", game::title(), MB_ICONINFORMATION);
         return 1;
     }

@@ -46,10 +46,16 @@ int64_t Audio::next_until(int64_t now_ticks, int samples) const {
     // After a stall of more than a quarter of a second the output catches up at once; render() then applies
     // the missed register writes silently instead of squeezing them into one buffer.
     if (real - target > freq_ / 4) return real;
-    // Otherwise the sound card's clock is pulled gently towards the system clock: each buffer corrects an
-    // eighth of the difference, at most a quarter of its length, so the output never runs ahead of the
-    // register writes and never jumps.
-    const int64_t correction = std::clamp((real - target) / 8, -span / 4, span / 4);
+    // Filling the queue renders up to kBuffersQueued buffers at once, so the timeline normally runs up to that
+    // much ahead of real time. That offset is intended and stays smaller than the latency, so it is left alone.
+    // Only a drift beyond it, from the sound card's clock differing from the system clock, is corrected:
+    // each buffer removes an eighth of the excess, at most a quarter of its length, so the tempo hardly
+    // changes and nothing jumps.
+    const int64_t band = (kBuffersQueued + 1) * span;
+    const int64_t diff = real - target;
+    if (diff >= -band && diff <= band) return target;
+    const int64_t excess = diff > 0 ? diff - band : diff + band;
+    const int64_t correction = std::clamp(excess / 8, -span / 4, span / 4);
     return std::max(render_time_, target + correction);
 }
 

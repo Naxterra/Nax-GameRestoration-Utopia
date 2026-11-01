@@ -1,0 +1,40 @@
+# Entry points of MT32.DRV that discovery cannot prove, as segment:offset from the driver's load segment.
+# The initialisation writes the address of its interrupt handler straight into the interrupt table,
+# so the handler is never the target of a jump.
+0000:0145
+# The handler checks the function number with "cmp ax, 0Dh" / "jbe", loads the routine from the 14-entry
+# table at 019Dh and jumps through a register, which discovery does not follow. These are the 14 entries.
+0000:0178
+0000:01f5
+0000:077e
+0000:04af
+0000:04ed
+0000:0293
+0000:03e6
+0000:048d
+0000:03f4
+0000:01ea
+0000:01b9
+0000:01df
+0000:0222
+0000:042b
+# "mov ax, [bx+135Eh]" and "mov ax, [bx+139Eh]" followed by "jmp ax" come after "and bx, 1Fh" / "shl bx, 1",
+# so each table has 32 entries. These are the distinct entries of both tables.
+0000:0a0d
+0000:0a67
+0000:0a93
+0000:0bea
+0000:0a0c
+0000:0a0e
+0000:0c55
+0000:0ae9
+0000:0aa7
+0000:0abc
+0000:0ac8
+0000:0b29
+0000:0b39
+0000:0b21
+0000:087d
+0000:0b4c
+# Timer handler, installed with "mov ax, 0DC9h" / "mov es:[0020h], ax" straight into the interrupt table.
+0000:0dc9

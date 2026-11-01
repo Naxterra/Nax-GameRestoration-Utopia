@@ -1,0 +1,34 @@
+# Entry points of U.MDG that discovery cannot prove, as segment:offset from the load segment.
+# Timer handler installed with INT 21h AH=25h, whose DS:DX is set outside the window discovery follows.
+0ffe:4bb1
+# "call word ptr cs:[bx-680Ch]" at 0FFE:969A uses the table at 97F4h. It holds seven handlers; the next word
+# is the first instruction of the code that follows the table.
+0ffe:98f7
+0ffe:9965
+0ffe:99ad
+0ffe:99f5
+0ffe:9ba4
+0ffe:9a43
+0ffe:9ab5
+# "call word ptr cs:[bx+64CBh]" at 0FFE:64C1 uses the table at 64CBh. It fills the 20 words up to the code at
+# 64F3h, which is also its sixth entry.
+0ffe:64f4
+0ffe:6c6c
+0ffe:6595
+0ffe:48f2
+0ffe:65fe
+0ffe:64f3
+0ffe:668e
+0ffe:66b1
+0ffe:66dc
+0ffe:4795
+0ffe:6726
+0ffe:67f7
+0ffe:68c0
+0ffe:d52c
+0ffe:6908
+0ffe:6933
+0ffe:69e1
+0ffe:6a13
+0ffe:6a94
+0ffe:6aff

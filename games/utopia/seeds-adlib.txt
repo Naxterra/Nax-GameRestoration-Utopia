@@ -1,0 +1,37 @@
+# Entry points of ADLIB.DRV that discovery cannot prove, as segment:offset from the driver's load segment.
+# The initialisation writes the address of its interrupt handler straight into the interrupt table,
+# so the handler is never the target of a jump.
+0000:015c
+# The handler checks the function number with "cmp ax, 0Dh" / "jbe", loads the routine from the 14-entry
+# table at 019Dh and jumps through a register, which discovery does not follow. These are the 14 entries.
+0000:013b
+0000:01fc
+0000:0554
+0000:0463
+0000:04a0
+0000:02b6
+0000:0419
+0000:0458
+0000:042e
+0000:01b9
+0000:01b9
+0000:01b9
+0000:0234
+0000:01c4
+# Timer handler, installed with "mov word ptr es:[0020h], 0C9Fh" straight into the interrupt table.
+0000:0c9f
+# "jmp word ptr [bx+0ECDh]" and "jmp word ptr [bx+0F0Dh]" follow "and bx, 1Fh" / "shl bx, 1", so each table has 32
+# entries. The tables are read through DS, which the driver sets to CS on entry but before calls that
+# discovery cannot see through. These are the distinct entries of both tables.
+0000:079e
+0000:0834
+0000:085e
+0000:08fc
+0000:079d
+0000:07fe
+0000:098e
+0000:088a
+0000:0899
+0000:08a9
+0000:0891
+0000:08bc

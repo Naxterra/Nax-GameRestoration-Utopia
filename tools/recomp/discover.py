@@ -231,16 +231,29 @@ class Discovery:
         if insn.mnemonic not in ("jmp", "call") or op.type != x86.X86_OP_MEM or op.size != 2:
             return False
         mem = op.mem
-        if mem.segment != x86.X86_REG_CS or mem.base == 0 or mem.index != 0:
+        if mem.base == 0 or mem.index != 0:
             return False
-        disp = mem.disp & 0xFFFF
         seq = list(recent)
+        ds_load = None
+        if mem.segment != x86.X86_REG_CS:
+            # A DS-relative table counts as a table in the code segment only while DS provably holds CS.
+            if mem.segment not in (0, x86.X86_REG_DS) or insn.reg_name(mem.base) == "bp":
+                return False
+            ds = self.segment_value(recent, "ds", cs)
+            if ds is None or ds[0] != cs:
+                return False
+            ds_load = self.position(seq, ds[1])
+        disp = mem.disp & 0xFFFF
         point = self.image.linear(cs, ip)
         bound = self.table_bound(recent, insn.reg_name(mem.base))
         if bound is not None:
             offsets, start = bound
+            if ds_load is not None:
+                start = min(start, ds_load)
             self.resolve_table(cs, ip, insn, disp, offsets, "bounded by cmp", self.dependents(cs, seq, start, point))
             return True
+        if ds_load is not None:
+            return False
         source = self.index_source(recent, mem.base)
         if source is not None:
             self.deferred.append((cs, ip, insn, disp, source, self.dependents(cs, seq, len(seq) - 1, point)))
@@ -308,9 +321,23 @@ class Discovery:
             if family(index_reg) in {family(w) for w in self.writes(insn)}:
                 if self.is_doubling(insn, index_reg) and not doubled_after_cmp:
                     doubled_after_cmp = True
+                elif doubled_after_cmp and self.mask_bound(insn, index_reg) is not None:
+                    # "and reg, 2^n-1" before the doubling leaves exactly the entry numbers 0 to 2^n-1.
+                    return [2 * k for k in range(self.mask_bound(insn, index_reg) + 1)], i
                 else:
                     return None
         return None
+
+    @staticmethod
+    def mask_bound(insn, reg):
+        """Returns m for "and reg, m" when m has the form 2^n-1 and selects a sane table size, or None."""
+        ops = insn.operands
+        if insn.mnemonic != "and" or len(ops) != 2 or ops[0].type != x86.X86_OP_REG or insn.reg_name(ops[0].reg) != reg:
+            return None
+        if ops[1].type != x86.X86_OP_IMM:
+            return None
+        m = ops[1].imm & 0xFFFF
+        return m if m < MAX_TABLE_ENTRIES and (m & (m + 1)) == 0 else None
 
     def doubled_before(self, seq, reg):
         """Returns the position of the doubling that last wrote reg before the end of seq, or None."""

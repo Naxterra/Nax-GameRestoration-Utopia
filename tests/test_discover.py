@@ -164,6 +164,30 @@ class BoundedTableTests(unittest.TestCase):
         self.assertTrue(disc.tables[0][4].endswith("(unproven)"))
         self.assertTrue(any("unproven" in text for _cs, _ip, text in disc.indirect))
 
+    def test_and_mask_before_doubling_bounds_table_to_mask_plus_one_entries(self):
+        code = bytearray(0x60)
+        code[0x00:0x03] = bytes.fromhex("83e301")          # and bx, 1
+        code[0x03:0x05] = bytes.fromhex("d1e3")            # shl bx, 1
+        code[0x05:0x0A] = bytes.fromhex("2effa74000")      # jmp word ptr cs:[bx + 0040]
+        code[0x20:0x24] = EXIT
+        code[0x28:0x2C] = EXIT
+        code[0x40:0x46] = bytes.fromhex("200028009900")    # dw 0020, 0028, 0099
+        disc = explore(code)
+        self.assertIn(0x20, disc.code)
+        self.assertIn(0x28, disc.code)
+        self.assertNotIn(0x99, disc.code)
+        self.assertEqual(disc.indirect, [])
+
+    def test_and_mask_with_gaps_does_not_bound_table(self):
+        code = bytearray(0x60)
+        code[0x00:0x03] = bytes.fromhex("83e302")          # and bx, 2 (values 0 and 2 only, not a range)
+        code[0x03:0x05] = bytes.fromhex("d1e3")            # shl bx, 1
+        code[0x05:0x0A] = bytes.fromhex("2effa74000")      # jmp word ptr cs:[bx + 0040]
+        code[0x40:0x46] = bytes.fromhex("200028009900")
+        disc = explore(code)
+        self.assertEqual(disc.tables, [])
+        self.assertEqual(len(disc.indirect), 1)
+
     def test_jb_before_table_jump_is_not_taken_as_upper_bound(self):
         # The jump is reached when jb is not taken, that is with bx >= 4, so the cmp proves no upper bound.
         disc = explore(bounded_table_program(bytes.fromhex("83fb04" "7210")))  # cmp bx, 4 / jb 0015

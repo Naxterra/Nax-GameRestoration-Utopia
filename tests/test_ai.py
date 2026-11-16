@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import convert_realesrgan  # noqa: E402
 import reference_upscale  # noqa: E402
 import rrdb  # noqa: E402
+import terrain  # noqa: E402
 import upscale_sprites  # noqa: E402
 
 
@@ -185,6 +186,50 @@ class RrdbTests(unittest.TestCase):
         out = rrdb.upscale_image(net, rng.integers(0, 256, (3, 5, 3)).astype(np.uint8))
         self.assertEqual(out.shape, (12, 20, 3))
         self.assertTrue((out == 128).all())
+
+
+class TerrainTests(unittest.TestCase):
+    def tile(self):
+        rgba = np.zeros((15, 32, 4), np.uint8)
+        rgba[:, :, :3] = (120, 50, 10)
+        for y in range(15):
+            half = min(16, int(16 * (1 - abs(y - 7) / 7.5)) + 1)
+            rgba[y, 16 - half:16 + half, 3] = 255
+        rgba[7, 10:12, :3] = 0
+        return rgba
+
+    def test_neighbouring_ground_tiles_continue_the_texture_without_a_seam(self):
+        texture = terrain.GroundTexture(np.random.default_rng(1).integers(0, 256, (64, 64, 3)))
+        big = terrain.ground_tile(self.tile(), texture, amount=1.0, rocks=0.0)
+        # A neighbour sits 16 pixels across and 8 down, so its pixel at (x, y) shows the ground at (x + 16, y + 8)
+        # of this tile. With an even base colour both must show the same texture there.
+        k = terrain.SCALE
+        ys, xs = np.mgrid[4 * k:6 * k, 18 * k:22 * k]
+        x, y = (xs + 0.5) / k, (ys + 0.5) / k
+        here = texture.sample(texture.detail, x / 32 + y / 16, -x / 32 + y / 16)
+        there = texture.sample(texture.detail, (x - 16) / 32 + (y - 8) / 16, -(x - 16) / 32 + (y - 8) / 16)
+        self.assertTrue(np.allclose(here, there, atol=1e-4))
+        self.assertEqual(big.shape, (15 * k, 32 * k, 4))
+
+    def test_flat_tile_counts_as_ground_and_tile_with_bright_marking_does_not(self):
+        tile = self.tile()
+        self.assertTrue(terrain.is_ground(tile))
+        marked = tile.copy()
+        marked[7, 15:17, :3] = (255, 255, 0)
+        self.assertFalse(terrain.is_ground(marked))
+        tall = np.zeros((40, 32, 4), np.uint8)
+        tall[:, :, 3] = 255
+        self.assertFalse(terrain.is_ground(tall))
+
+    def test_ground_tile_keeps_size_transparency_and_dark_rocks(self):
+        texture = terrain.GroundTexture(np.full((32, 32, 3), 128, np.uint8))
+        big = terrain.ground_tile(self.tile(), texture)
+        k = terrain.SCALE
+        self.assertEqual(big.shape, (15 * k, 32 * k, 4))
+        self.assertEqual(big[0, 0, 3], 0)
+        self.assertEqual(big[7 * k + 4, 16 * k, 3], 255)
+        self.assertLess(big[7 * k + 4, 10 * k + 8, :3].mean(), 40)  # the rock stays dark
+        self.assertGreater(big[7 * k + 4, 20 * k, 0], 90)  # the soil keeps its colour
 
 
 class SpriteTests(unittest.TestCase):

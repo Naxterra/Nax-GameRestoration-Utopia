@@ -4,3 +4,6 @@
 0ffe:220a utopia_sprite_rows_in_cx
 0ffe:2b10 utopia_sprite_rows_in_cx_es_in_ax
 0ffe:3364 utopia_sprite_rows_in_bp
+# The routine that unpacks the screen pictures: where it starts and where it returns.
+0ffe:0aec utopia_unpack_start
+0ffe:0ba1 utopia_unpack_end

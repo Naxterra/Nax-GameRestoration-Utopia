@@ -278,6 +278,29 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return none_before && refs[10 * 320 + 5] == nax::HdSprites::kNone && refs[10 * 320 + 6] != nax::HdSprites::kNone;
      }},
+    {"picture_waits_for_a_steady_palette_and_shows_again_where_the_game_restores_it", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         hd.set_screen_source(kBuffer);
+         for (uint32_t i = 0; i < 320 * 20; i++) m.mem[kBuffer + i] = 0x07;  // a picture of 20 lines
+         hd.image(m, kBuffer, 320, 20, 320, kBuffer, 320);
+         std::vector<uint32_t> refs(64000);
+         hd.frame(m, refs.data());  // sees the palette for the first time, so the picture waits
+         const bool waited = hd.sprite_count() == 0;
+         Sleep(600);
+         hd.frame(m, refs.data());  // the palette has stayed the same, so the picture is taken over
+         hd.placed(0, 0, 0);
+         m.mem[kSpriteData] = 0x12;
+         hd.draw(m, kSpriteData, 32, 2, kDest, 0x40);  // drawn over line 10 at x 5
+         hd.placed(1, 400, 0);
+         const uint32_t at = 10 * 320 + 5;
+         m.mem[0xA0000 + at] = 0x41;  // the sprite on screen
+         hd.frame(m, refs.data());
+         const bool sprite = refs[at] == (400u | (1u << 16));
+         m.mem[0xA0000 + at] = 0x07;  // the game restored the picture
+         hd.frame(m, refs.data());
+         return waited && sprite && refs[at] == (5u | (10u << 16));
+     }},
     {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
          Fixture f;
          nax::HdSprites hd;

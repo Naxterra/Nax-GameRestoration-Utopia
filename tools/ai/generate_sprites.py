@@ -1,15 +1,16 @@
-"""Redraws the sprites a game has saved with a diffusion model, adding detail the original pixels never had.
+"""Redraws the sprites a game has saved on the graphics card, at eight times their size.
 
 Usage, with the Python of the PyTorch environment described in the README:
-    python -I generate_sprites.py [<game>] [--strength 0.35] [--prompt <text>] [--again] [--seed <n>]
+    python -I generate_sprites.py [<game>] [--texture <png>] [--strength 0.35] [--prompt <text>] [--again]
 
-Each sprite from %LOCALAPPDATA%\\Nax Game Restoration\\<game>\\hd\\original goes through three steps on the
-graphics card:
-1. RealESRGAN_x4plus enlarges it four times, which gives clean shapes but little detail.
-2. Stable Diffusion XL redraws that picture at about 1024 pixels with the ControlNet Tile model, which keeps the
+Ground tiles (flat diamonds without bright markings, see terrain.py) get the fine detail of a seamless ground
+texture, made with generate_texture.py and kept as hd\\ground.png, so the terrain continues from tile to tile
+without seams. Every other sprite from %LOCALAPPDATA%\\Nax Game Restoration\\<game>\\hd\\original is enlarged by
+RealESRGAN_x4plus, and with --strength above 0 it then goes through two more steps:
+1. Stable Diffusion XL redraws that picture at about 1024 pixels with the ControlNet Tile model, which keeps the
    layout of every part. A low strength means the model only adds detail and does not invent new objects.
-3. The result is reduced to eight times the original size, and its broad colours and shading are replaced by
-   those of step 1, so the sprite keeps the game's colours and fits its neighbours, and only the fine detail
+2. The result is reduced to eight times the original size, and its broad colours and shading are replaced by
+   those of the enlarged picture, so the sprite keeps the game's colours and fits its neighbours, and only the fine detail
    comes from the diffusion model.
 The pictures go to hd\\upscaled with the transparency of the original. Sprites that already have a picture
 there are skipped unless --again is given. A running game picks the new pictures up within a few seconds.
@@ -32,6 +33,7 @@ from PIL import Image, ImageFilter  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import rrdb  # noqa: E402
+import terrain  # noqa: E402
 import upscale_sprites  # noqa: E402
 
 BORDER = 4
@@ -102,11 +104,11 @@ def redraw(pipe, esrgan, rgba, args, generator):
         size = (max(64, int(round(clean.shape[1] * k / 8)) * 8), max(64, int(round(clean.shape[0] * k / 8)) * 8))
         canvas = Image.fromarray(clean).resize(size, Image.LANCZOS)
         result = pipe(prompt=args.prompt, negative_prompt=NEGATIVE, image=canvas, control_image=canvas,
-                      strength=args.strength, num_inference_steps=args.steps, guidance_scale=5.0,
-                      controlnet_conditioning_scale=0.8, generator=generator).images[0]
+                      strength=args.strength, num_inference_steps=args.steps, guidance_scale=args.guidance,
+                      controlnet_conditioning_scale=args.control, generator=generator).images[0]
         detailed = np.asarray(result.resize(target, Image.LANCZOS), np.float32)
         # Fine detail from the diffusion model on top of the broad colours and shading of the clean picture.
-        radius = SCALE * 0.6
+        radius = SCALE * args.colour_blur
         merged = detailed - broad(detailed.astype(np.uint8), radius) + broad(reference, radius)
         reference = np.clip(merged + 0.5, 0, 255).astype(np.uint8)
     cut = reference[BORDER * SCALE:-BORDER * SCALE, BORDER * SCALE:-BORDER * SCALE]
@@ -117,8 +119,15 @@ def redraw(pipe, esrgan, rgba, args, generator):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("game", nargs="?", default="utopia")
-    parser.add_argument("--strength", type=float, default=0.35, help="how much the diffusion model may change, 0 to 1")
+    parser.add_argument("--strength", type=float, default=0.0,
+                        help="how much the diffusion model may change sprites other than ground tiles, 0 to 1")
+    parser.add_argument("--texture", help="the seamless ground texture, by default ground.png in the game's hd folder")
     parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--control", type=float, default=0.8, help="how closely the redraw follows the clean picture's layout")
+    parser.add_argument("--guidance", type=float, default=5.0, help="how closely the redraw follows the prompt")
+    parser.add_argument("--colour-blur", type=float, default=1.0,
+                        help="how broad the colours taken from the clean picture are, in original pixels")
+    parser.add_argument("--out", help="write the pictures to this folder instead of the upscaled folder, for trying settings")
     parser.add_argument("--prompt", default=PROMPT)
     parser.add_argument("--seed", type=int, default=1992)
     parser.add_argument("--again", action="store_true", help="also redo sprites that already have an upscaled picture")
@@ -127,21 +136,28 @@ def main():
     if not torch.cuda.is_available():
         sys.exit("PyTorch cannot reach the graphics card.")
     root = os.path.join(BASE, args.game, "hd")
-    originals = sorted(glob.glob(os.path.join(root, "original", (args.only or "") + "*.png")))
+    originals = sorted(p for prefix in (args.only or "").split(",")
+                       for p in glob.glob(os.path.join(root, "original", prefix + "*.png")))
     if not originals:
         sys.exit(f"No saved sprites in {os.path.join(root, 'original')}. Play the game for a while first.")
-    os.makedirs(os.path.join(root, "upscaled"), exist_ok=True)
+    out_dir = args.out or os.path.join(root, "upscaled")
+    os.makedirs(out_dir, exist_ok=True)
     device = "cuda"
     esrgan = GpuRrdb(os.path.join(BASE, "models", "RealESRGAN_x4plus.pth"), device)
     pipe = load_diffusion(device) if args.strength > 0 else None
+    texture_path = args.texture or os.path.join(root, "ground.png")
+    ground = terrain.GroundTexture(np.asarray(Image.open(texture_path).convert("RGB"))) if os.path.exists(texture_path) else None
     done = 0
     for path in originals:
-        target = os.path.join(root, "upscaled", os.path.basename(path))
+        target = os.path.join(out_dir, os.path.basename(path))
         if os.path.exists(target) and not args.again:
             continue
         rgba = np.asarray(Image.open(path).convert("RGBA"))
-        generator = torch.Generator(device).manual_seed(args.seed)
-        result = redraw(pipe, esrgan, rgba, args, generator)
+        if ground is not None and terrain.is_ground(rgba):
+            result = terrain.ground_tile(rgba, ground)
+        else:
+            generator = torch.Generator(device).manual_seed(args.seed)
+            result = redraw(pipe, esrgan, rgba, args, generator)
         temporary = target + ".part"
         Image.fromarray(result, "RGBA").save(temporary, format="PNG")
         upscale_sprites.replace_file(temporary, target)

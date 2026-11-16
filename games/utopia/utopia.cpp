@@ -15,19 +15,40 @@ const nax::ModuleInfo* nax_module_beeper();
 const nax::ModuleInfo* nax_module_adlib();
 const nax::ModuleInfo* nax_module_mt32();
 
-// The hooks listed in hooks-u.txt. Each runs where one of the game's three map sprite routines has set up a
-// sprite: DS:SI points to its 4-bit pixels, DS:BX to its entry in the sprite table (whose first byte is the
-// colour base), and DI is where its bottom row starts. The sprites are 32 pixels wide.
+// The hooks listed in hooks-u.txt. U.MDG runs with CS = load segment + 0FFEh, and it draws every frame into a
+// 320x200 buffer at load segment + 5872h, which it then copies to the screen as a whole.
 namespace {
+uint16_t picture_buffer(const nax::Machine& m) { return uint16_t(m.c.cs - 0x0ffe + 0x5872); }
+
+// Each of the game's three map sprite routines has set up a sprite: DS:SI points to its 4-bit pixels, DS:BX to
+// its entry in the sprite table (whose first byte is the colour base), and DI is where its bottom row starts.
+// The sprites are 32 pixels wide.
 void report_sprite(nax::Machine& m, uint16_t rows, uint16_t target_segment) {
     if (!m.hd) return;
+    m.hd->set_screen_source(nax::Machine::linear(picture_buffer(m), 0));
     m.hd->draw(m, nax::Machine::linear(m.c.ds, m.c.si), 32, rows, nax::Machine::linear(target_segment, m.c.di), m.rd8(m.c.ds, m.c.b.x));
 }
+
+// The game unpacks its screen pictures (the stone backdrop, the frames and the panels) with one routine, from
+// DS:SI to ES:DI. When it unpacks whole lines into the picture buffer, those lines are reported as a picture.
+uint16_t unpack_segment = 0, unpack_start = 0;
 }  // namespace
 
 void utopia_sprite_rows_in_cx(nax::Machine& m) { report_sprite(m, m.c.c.x, m.c.es); }
 void utopia_sprite_rows_in_cx_es_in_ax(nax::Machine& m) { report_sprite(m, m.c.c.x, m.c.a.x); }
 void utopia_sprite_rows_in_bp(nax::Machine& m) { report_sprite(m, m.c.bp, m.c.es); }
+void utopia_unpack_start(nax::Machine& m) {
+    unpack_segment = m.c.es;
+    unpack_start = m.c.di;
+}
+void utopia_unpack_end(nax::Machine& m) {
+    if (!m.hd || m.c.es != unpack_segment || unpack_segment != picture_buffer(m)) return;
+    const uint16_t length = uint16_t(m.c.di - unpack_start);
+    if (length == 0 || length % 320 != 0 || unpack_start % 320 != 0) return;
+    m.hd->set_screen_source(nax::Machine::linear(picture_buffer(m), 0));
+    const uint32_t at = nax::Machine::linear(unpack_segment, unpack_start);
+    m.hd->image(m, at, 320, length / 320, 320, at, 320);
+}
 
 namespace game {
 

@@ -42,6 +42,8 @@ While the game runs, the runtime watches the game's sprite drawing routines and 
 python -I tools\ai\upscale_sprites.py utopia
 ```
 
+The tool works best with a large ESRGAN model. Download `RealESRGAN_x4plus.pth` from the releases of the Real-ESRGAN project on GitHub (BSD 3-Clause License) and put it in `%LOCALAPPDATA%\Nax Game Restoration\models`, where the tool looks for it first. It takes about a second per sprite on the processor. Without it the tool uses the small network that comes with this repository, which gives softer pictures. Any other 4x ESRGAN checkpoint, for example the pixel art model `4x-PixelPerfectV4` from OpenModelDB, can be given with `--model <file>`. The checkpoints are read without PyTorch by a loader that refuses anything but weights.
+
 A running game picks the new pictures up within a few seconds. With the AI filter, every screen pixel that belongs to a sprite is then drawn from that sprite's upscaled picture. The upscaled pictures are ordinary PNG files, so they can also be improved by hand or with another tool, as long as each keeps exactly four times the size of its original. The tool skips sprites that already have a picture unless `--again` is given, so edited pictures are kept. The pictures are made from your copy of the game and stay on your machine.
 
 ## Music and options
@@ -68,7 +70,7 @@ The original game files are never changed. Save games and every other file the g
 | Folder | Content |
 |---|---|
 | `tools/recomp` | The translator: the MZ and EXEPACK loader, code discovery and the C++ generator, written in Python. |
-| `tools/ai` | The converter that turns a Real-ESRGAN checkpoint into the AI filter's weight file without PyTorch, a CPU reference of the network for checking the GPU version, and the tool that upscales the saved sprites. |
+| `tools/ai` | The converter that turns a Real-ESRGAN checkpoint into the AI filter's weight file without PyTorch, a CPU reference of the network for checking the GPU version, the ESRGAN network for large models, and the tool that upscales the saved sprites. |
 | `models` | The AI filter's weights and their license. The build copies them next to the program. |
 | `runtime` | The native runtime: CPU helpers, DOS, BIOS, mouse and VGA services, the OPL2 synthesiser, sound output, the sprite tracker and the Direct3D 12 window. |
 | `games/<game>` | What each game needs: the replacement for its launcher and the seed lists of entry points that discovery cannot prove, and the hooks that report the game's sprite drawing. |

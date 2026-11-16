@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import convert_realesrgan  # noqa: E402
 import reference_upscale  # noqa: E402
+import rrdb  # noqa: E402
 import upscale_sprites  # noqa: E402
 
 
@@ -26,8 +27,12 @@ def rebuild(*args):
     raise AssertionError("only used as a pickled reference")
 
 
-def checkpoint(state, path, extra=None):
-    """Writes a checkpoint the way torch.save does: a zip with data.pkl and one raw file per tensor."""
+def checkpoint(state, path, extra=None, legacy=False):
+    """Writes a checkpoint the way torch.save does: a zip with data.pkl and one raw file per tensor.
+
+    With legacy it uses the format of PyTorch before 1.6 instead, with the bare state dictionary as old ESRGAN
+    checkpoints have it: four pickles, the list of storage keys, then each storage's length and numbers.
+    """
     torch_utils = types.ModuleType("torch._utils")
     torch_utils._rebuild_tensor_v2 = rebuild
     rebuild.__module__, rebuild.__qualname__ = "torch._utils", "_rebuild_tensor_v2"
@@ -63,13 +68,22 @@ def checkpoint(state, path, extra=None):
             storages[key] = np.asarray(values, np.float32).ravel()
             tensors[name] = Tensor(key, np.asarray(values).shape)
         buf = io.BytesIO()
-        Writer(buf, protocol=2).dump({"params": tensors} if extra is None else extra)
+        Writer(buf, protocol=2).dump(tensors if legacy else {"params": tensors} if extra is None else extra)
     finally:
         for k, v in saved.items():
             if v is None:
                 sys.modules.pop(k, None)
             else:
                 sys.modules[k] = v
+    if legacy:
+        with open(path, "wb") as f:
+            for record in (0x1950A86A20F9469CFC6C, 1001, {"little_endian": True}):
+                f.write(pickle.dumps(record, protocol=2))
+            f.write(buf.getvalue())
+            f.write(pickle.dumps(list(storages), protocol=2))
+            for values in storages.values():
+                f.write(struct.pack("<q", len(values)) + values.astype("<f4").tobytes())
+        return
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("archive/data.pkl", buf.getvalue())
         for key, values in storages.items():
@@ -147,6 +161,32 @@ class ReferenceTests(unittest.TestCase):
                 reference_upscale.load_weights(path)
 
 
+class RrdbTests(unittest.TestCase):
+    def test_old_format_esrgan_checkpoint_loads_and_upscales_four_times(self):
+        rng = np.random.default_rng(3)
+        nf, gc = 4, 2
+        state = {"model.0.weight": rng.standard_normal((nf, 3, 3, 3)), "model.0.bias": rng.standard_normal(nf)}
+        for r in (1, 2, 3):
+            for c in range(1, 6):
+                cin, cout = nf + (c - 1) * gc, (gc if c < 5 else nf)
+                state[f"model.1.sub.0.RDB{r}.conv{c}.0.weight"] = rng.standard_normal((cout, cin, 3, 3))
+                state[f"model.1.sub.0.RDB{r}.conv{c}.0.bias"] = rng.standard_normal(cout)
+        for name, cin, cout in (("model.1.sub.1", nf, nf), ("model.3", nf, nf), ("model.6", nf, nf), ("model.8", nf, nf), ("model.10", nf, 3)):
+            state[name + ".weight"] = rng.standard_normal((cout, cin, 3, 3))
+            state[name + ".bias"] = rng.standard_normal(cout)
+        state["model.10.weight"] = np.zeros((3, nf, 3, 3))
+        state["model.10.bias"] = np.full(3, 0.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "old.pth")
+            checkpoint(state, path, legacy=True)
+            net = rrdb.load(path)
+        self.assertEqual(net[1], 1)
+        self.assertEqual(net[0]["conv_body.weight"].shape, (nf, nf, 3, 3))
+        out = rrdb.upscale_image(net, rng.integers(0, 256, (3, 5, 3)).astype(np.uint8))
+        self.assertEqual(out.shape, (12, 20, 3))
+        self.assertTrue((out == 128).all())
+
+
 class SpriteTests(unittest.TestCase):
     def test_transparent_pixels_take_colour_of_visible_neighbours_and_visible_ones_stay(self):
         rgb = np.zeros((3, 4, 3), np.uint8)
@@ -164,7 +204,7 @@ class SpriteTests(unittest.TestCase):
         layers = [(np.zeros((48, 3, 3, 3), np.float32), np.zeros(48, np.float32), None)]
         rgba = np.zeros((5, 6, 4), np.uint8)
         rgba[2, 3] = (10, 20, 30, 255)
-        big = upscale_sprites.upscale_sprite(layers, 4, rgba)
+        big = upscale_sprites.upscale_sprite(lambda image: reference_upscale.upscale_image(layers, 4, image), rgba)
         self.assertEqual(big.shape, (20, 24, 4))
         self.assertEqual(big[8:12, 12:16, 3].min(), 255)
         self.assertEqual(big[:8, :, 3].max(), 0)

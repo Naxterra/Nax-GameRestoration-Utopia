@@ -21,7 +21,8 @@ namespace {
 //      in which stair steps along diagonal and round edges become smooth lines while flat areas stay unchanged.
 //   2  CRT: the picture as a colour monitor of the time showed it, with visible scanlines, a slight glow
 //      between them and an aperture grille, computed in linear light.
-//   3  AI upscaling: the picture redrawn at four times the size by a neural network (see ai_upscaler.cpp).
+//   3  AI upscaling: strong edges redrawn at four times the size by a neural network (see ai_upscaler.cpp),
+//      with the original pixels kept for the game's fine textures.
 const char kShader[] = R"(
 cbuffer Params : register(b0) { float2 scale; uint mode; uint unused; };
 Texture2D picture : register(t0);
@@ -69,6 +70,27 @@ float3 smooth_edges(float2 uv) {
                double_size(p2 + int2(0, 1)), p4 & 1);
 }
 
+// The network treats fine low-contrast detail such as soil speckle or background noise as a flaw: it erases
+// it or turns it into streaks. So its picture is used only on strong edges, measured as the largest colour
+// difference to the four neighbours: up to 0.24 the original pixels stay (that covers the game's textures),
+// from 0.40 the network's picture is shown (outlines, cracks, icons, letters), with a smooth change between.
+float largest(float3 v) { return max(max(v.r, v.g), v.b); }
+float contrast_at(int2 p) {
+    float3 c = texel(p);
+    return max(max(largest(abs(c - texel(p + int2(1, 0)))), largest(abs(c - texel(p - int2(1, 0))))),
+               max(largest(abs(c - texel(p + int2(0, 1)))), largest(abs(c - texel(p - int2(0, 1))))));
+}
+float3 ai_blend(float2 uv) {
+    float3 network = sharp_of(upscaled, size * 4, scale / 4, uv);
+    float3 original = sharp(uv);
+    float2 s = uv * size - 0.5;
+    int2 p = int2(floor(s));
+    float2 f = s - p;
+    float c = lerp(lerp(contrast_at(p), contrast_at(p + int2(1, 0)), f.x),
+                   lerp(contrast_at(p + int2(0, 1)), contrast_at(p + int2(1, 1)), f.x), f.y);
+    return lerp(original, network, smoothstep(0.24, 0.40, c));
+}
+
 float3 to_linear(float3 c) { return pow(max(c, 0), 2.4); }
 float3 row_colour(float x, float row) {
     // Horizontally the beam blends neighbouring pixels a little; the sharp-bilinear rule keeps that slight.
@@ -99,7 +121,7 @@ float3 crt(float2 uv, float2 pos) {
 float4 ps(V i) : SV_Target {
     if (mode == 1) return float4(smooth_edges(i.uv), 1);
     if (mode == 2) return float4(crt(i.uv, i.pos.xy), 1);
-    if (mode == 3) return float4(sharp_of(upscaled, size * 4, scale / 4, i.uv), 1);
+    if (mode == 3) return float4(ai_blend(i.uv), 1);
     return float4(sharp(i.uv), 1);
 }
 )";

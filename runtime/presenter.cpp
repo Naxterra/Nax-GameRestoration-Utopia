@@ -21,8 +21,8 @@ namespace {
 //      in which stair steps along diagonal and round edges become smooth lines while flat areas stay unchanged.
 //   2  CRT: the picture as a colour monitor of the time showed it, with visible scanlines, a slight glow
 //      between them and an aperture grille, computed in linear light.
-//   3  AI upscaling: strong edges redrawn at four times the size by a neural network (see ai_upscaler.cpp),
-//      with the original pixels kept for the game's fine textures.
+//   3  AI upscaling: a neural network (see ai_upscaler.cpp) redraws the shapes at four times the size, and
+//      every screen pixel is then filled with the closest of the game's own colours, so edges stay hard.
 const char kShader[] = R"(
 cbuffer Params : register(b0) { float2 scale; uint mode; uint unused; };
 Texture2D picture : register(t0);
@@ -70,25 +70,39 @@ float3 smooth_edges(float2 uv) {
                double_size(p2 + int2(0, 1)), p4 & 1);
 }
 
-// The network treats fine low-contrast detail such as soil speckle or background noise as a flaw: it erases
-// it or turns it into streaks. So its picture is used only on strong edges, measured as the largest colour
-// difference to the four neighbours: up to 0.24 the original pixels stay (that covers the game's textures),
-// from 0.40 the network's picture is shown (outlines, cracks, icons, letters), with a smooth change between.
+// The network's own picture is soft: it blurs letters and icons, erases fine textures such as soil speckle
+// and turns background noise into streaks, and on a large screen it has to be enlarged further. So only the
+// shapes it draws are used, never its colours. Each screen pixel takes the network's colour at that point and
+// replaces it with the closest of the game's own colours around the source pixel, which gives hard, smooth
+// edges at the full screen resolution. Only neighbours that differ strongly from the pixel (more than 0.3 in
+// one channel) may take over its area, so the low-contrast textures keep their original pixels, and the
+// centre of every pixel keeps its colour, so single dots such as cracks and windows never disappear.
 float largest(float3 v) { return max(max(v.r, v.g), v.b); }
-float contrast_at(int2 p) {
-    float3 c = texel(p);
-    return max(max(largest(abs(c - texel(p + int2(1, 0)))), largest(abs(c - texel(p - int2(1, 0))))),
-               max(largest(abs(c - texel(p + int2(0, 1)))), largest(abs(c - texel(p - int2(0, 1))))));
-}
-float3 ai_blend(float2 uv) {
-    float3 network = sharp_of(upscaled, size * 4, scale / 4, uv);
-    float3 original = sharp(uv);
-    float2 s = uv * size - 0.5;
+float3 snapped(float2 uv) {
+    float3 network = upscaled.SampleLevel(smooth, uv, 0).rgb;
+    float2 s = uv * size;
     int2 p = int2(floor(s));
-    float2 f = s - p;
-    float c = lerp(lerp(contrast_at(p), contrast_at(p + int2(1, 0)), f.x),
-                   lerp(contrast_at(p + int2(0, 1)), contrast_at(p + int2(1, 1)), f.x), f.y);
-    return lerp(original, network, smoothstep(0.24, 0.40, c));
+    float3 own = texel(p);
+    if (length(s - p - 0.5) < 0.3) return own;
+    float3 best = own;
+    float best_distance = length(network - own) * 1.2;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float3 c = texel(p + int2(dx, dy));
+            float d = length(network - c);
+            if (largest(abs(c - own)) > 0.3 && d < best_distance) {
+                best = c;
+                best_distance = d;
+            }
+        }
+    }
+    return best;
+}
+float3 ai_shapes(float2 uv) {
+    // Four samples per screen pixel smooth the steps that the hard colour choice leaves along edges.
+    float2 o = 0.25 / (size * scale);
+    return (snapped(uv + float2(-o.x, -o.y)) + snapped(uv + float2(o.x, -o.y)) + snapped(uv + float2(-o.x, o.y)) +
+            snapped(uv + float2(o.x, o.y))) * 0.25;
 }
 
 float3 to_linear(float3 c) { return pow(max(c, 0), 2.4); }
@@ -121,7 +135,7 @@ float3 crt(float2 uv, float2 pos) {
 float4 ps(V i) : SV_Target {
     if (mode == 1) return float4(smooth_edges(i.uv), 1);
     if (mode == 2) return float4(crt(i.uv, i.pos.xy), 1);
-    if (mode == 3) return float4(ai_blend(i.uv), 1);
+    if (mode == 3) return float4(ai_shapes(i.uv), 1);
     return float4(sharp(i.uv), 1);
 }
 )";

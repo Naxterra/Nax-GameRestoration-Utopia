@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ai_upscaler.h"
+#include "hd_sprites.h"
 
 namespace nax {
 
@@ -30,14 +31,19 @@ public:
     bool enable_ai(const std::filesystem::path& weights, std::string* error);
     bool ai_ready() const { return ai_.ready(); }
     double ai_gpu_ms() { return ai_.last_gpu_ms(); }
+    // The AI filter draws the upscaled pictures that this tracker knows of in place of the game's sprites.
+    void set_hd(HdSprites* hd) { hd_ = hd; }
     // Draws one frame with the given filter; with a capture path it also saves the frame as a PNG file.
-    void draw(const uint32_t* rgba, int filter, const std::filesystem::path* capture = nullptr);
+    // hd_refs holds, for every pixel, the atlas cell of its upscaled picture or HdSprites::kNone.
+    void draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, const std::filesystem::path* capture = nullptr);
     // The rectangle inside the client area that shows the game picture, for mapping mouse positions.
     RECT picture_rect() const;
 
 private:
     static constexpr UINT kFrames = 2;
+    static constexpr UINT kAtlasCells = 1024;  // the atlas holds 1024x1024 original pixels, each as 4x4 texels
     void wait_idle();
+    void upload_hd(UINT frame);
     void create_targets();
 
     HWND hwnd_ = nullptr;
@@ -65,6 +71,11 @@ private:
     AiUpscaler ai_;
     std::vector<uint32_t> ai_input_;  // the picture the AI result belongs to
     UINT width_ = 0, height_ = 0;
+    HdSprites* hd_ = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> atlas_, refs_;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> atlas_uploads_[kFrames];  // kept until the frame has run
+    bool atlas_readable_ = false;
+    UINT shelf_x_ = 0, shelf_y_ = 0, shelf_height_ = 0;
 };
 
 }  // namespace nax

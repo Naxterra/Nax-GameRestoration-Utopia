@@ -16,7 +16,9 @@ param(
     [string]$GameFolder = "",
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
-    [switch]$Tests
+    [switch]$Tests,
+    # Records which instruction wrote each byte of memory, for finding a game's drawing code. Slower.
+    [switch]$Trace
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,7 +83,10 @@ foreach ($module in $spec.modules) {
     $seeds = Join-Path $root "games\$Game\seeds-$($module.name).txt"
     $arguments = @("-I", (Join-Path $root "tools\recomp\emit.py"), $source, $module.name, (Join-Path $generated "mod_$($module.name).cpp"))
     if ($module.flat) { $arguments += "--flat" }
+    if ($Trace) { $arguments += "--trace" }
     if (Test-Path $seeds) { $arguments += @("--seeds", $seeds) }
+    $hooks = Join-Path $root "games\$Game\hooks-$($module.name).txt"
+    if (Test-Path $hooks) { $arguments += @("--hooks", $hooks) }
     & $python @arguments
     if ($LASTEXITCODE -ne 0) { throw "Translating $($module.file) failed." }
 }
@@ -97,7 +102,7 @@ $sources = @($runtime) + ($spec.sources | ForEach-Object { Join-Path $root $_ })
 $optimize = if ($Configuration -eq "Release") { "/O2" } else { "/Od", "/Zi" }
 $flags = @("/nologo", "/std:c++20", "/EHsc", "/MT", "/W3", "/wd4102", "/MP", "/bigobj", "/utf-8",
     "/DNOMINMAX", "/D_CRT_SECURE_NO_WARNINGS", "/DWIN32_LEAN_AND_MEAN", "/DUNICODE", "/D_UNICODE", "/I$root", "/Fo$($objects -replace '\\', '/')/", "/Fe$(Join-Path $build $spec.exe)") + $optimize
-& cl.exe @flags @sources /link /SUBSYSTEM:WINDOWS d3d12.lib dxgi.lib d3dcompiler.lib user32.lib shell32.lib ole32.lib xaudio2.lib
+& cl.exe @flags @sources /link /SUBSYSTEM:WINDOWS d3d12.lib dxgi.lib d3dcompiler.lib windowscodecs.lib user32.lib shell32.lib ole32.lib xaudio2.lib
 if ($LASTEXITCODE -ne 0) { throw "Compiling failed." }
 # The AI filter's model goes next to the program.
 New-Item -ItemType Directory -Force (Join-Path $build "models") | Out-Null

@@ -1,6 +1,7 @@
 #include "presenter.h"
 
 #include <d3dcompiler.h>
+#include <wincodec.h>
 
 #include <algorithm>
 #include <cstring>
@@ -21,12 +22,15 @@ namespace {
 //      in which stair steps along diagonal and round edges become smooth lines while flat areas stay unchanged.
 //   2  CRT: the picture as a colour monitor of the time showed it, with visible scanlines, a slight glow
 //      between them and an aperture grille, computed in linear light.
-//   3  AI upscaling: a neural network (see ai_upscaler.cpp) redraws the shapes at four times the size, and
-//      every screen pixel is then filled with the closest of the game's own colours, so edges stay hard.
+//   3  AI upscaling: where a sprite has an upscaled picture (see hd_sprites.h), that picture is drawn at the
+//      full screen resolution. Everything else is redrawn by a neural network (see ai_upscaler.cpp) at four
+//      times the size, and every screen pixel is then filled with the closest of the game's own colours.
 const char kShader[] = R"(
 cbuffer Params : register(b0) { float2 scale; uint mode; uint unused; };
 Texture2D picture : register(t0);
 Texture2D upscaled : register(t1);
+Texture2D atlas : register(t2);
+Texture2D<uint> refs : register(t3);
 SamplerState smooth : register(s0);
 static const float2 size = float2(320, 200);
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -105,6 +109,17 @@ float3 ai_shapes(float2 uv) {
             snapped(uv + float2(o.x, o.y))) * 0.25;
 }
 
+float3 ai_picture(float2 uv) {
+    float2 s = uv * size;
+    int2 p = clamp(int2(floor(s)), int2(0, 0), int2(319, 199));
+    uint r = refs.Load(int3(p, 0));
+    if (r != 0xFFFFFFFFu) {
+        float2 cell = float2(r & 0xFFFF, r >> 16);
+        return atlas.SampleLevel(smooth, (cell + (s - p)) * 4 / 4096.0, 0).rgb;
+    }
+    return ai_shapes(uv);
+}
+
 float3 to_linear(float3 c) { return pow(max(c, 0), 2.4); }
 float3 row_colour(float x, float row) {
     // Horizontally the beam blends neighbouring pixels a little; the sharp-bilinear rule keeps that slight.
@@ -135,7 +150,7 @@ float3 crt(float2 uv, float2 pos) {
 float4 ps(V i) : SV_Target {
     if (mode == 1) return float4(smooth_edges(i.uv), 1);
     if (mode == 2) return float4(crt(i.uv, i.pos.xy), 1);
-    if (mode == 3) return float4(ai_shapes(i.uv), 1);
+    if (mode == 3) return float4(ai_picture(i.uv), 1);
     return float4(sharp(i.uv), 1);
 }
 )";
@@ -199,7 +214,7 @@ bool Presenter::init(HWND hwnd, std::string* error) {
     rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_DESCRIPTOR_HEAP_DESC sh{};
     sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    sh.NumDescriptors = 2;  // the game picture, then the AI picture
+    sh.NumDescriptors = 4;  // the game picture, the AI picture, the sprite atlas and the sprite references
     sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!check(device_->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&srv_heap_)), "Creating the texture heap", error)) return false;
 
@@ -215,7 +230,7 @@ bool Presenter::init(HWND hwnd, std::string* error) {
 
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 2;
+    range.NumDescriptors = 4;
     D3D12_ROOT_PARAMETER params[2]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.Num32BitValues = 4;
@@ -291,11 +306,31 @@ bool Presenter::init(HWND hwnd, std::string* error) {
         device_->CreateShaderResourceView(nullptr, &empty, slot);
     }
 
+    {
+        // The atlas of upscaled sprite pictures and, per screen pixel, the atlas cell to draw there.
+        const UINT increment = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_RESOURCE_DESC ad = td;
+        ad.Width = ad.Height = kAtlasCells * HdSprites::kScale;
+        if (!check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &ad, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&atlas_)),
+                   "Creating the sprite atlas", error))
+            return false;
+        D3D12_RESOURCE_DESC refs_desc = td;
+        refs_desc.Format = DXGI_FORMAT_R32_UINT;
+        if (!check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &refs_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&refs_)),
+                   "Creating the sprite reference texture", error))
+            return false;
+        auto slot = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+        slot.ptr += 2 * SIZE_T(increment);
+        device_->CreateShaderResourceView(atlas_.Get(), nullptr, slot);
+        slot.ptr += increment;
+        device_->CreateShaderResourceView(refs_.Get(), nullptr, slot);
+    }
+
     D3D12_HEAP_PROPERTIES upload_heap{};
     upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC bd{};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bd.Width = kWidth * 4 * kHeight;
+    bd.Width = kWidth * 4 * kHeight * 2;  // the picture, then the sprite references
     bd.Height = 1;
     bd.DepthOrArraySize = 1;
     bd.MipLevels = 1;
@@ -321,6 +356,100 @@ bool Presenter::enable_ai(const std::filesystem::path& weights, std::string* err
     slot.ptr += device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     device_->CreateShaderResourceView(ai_.result(), nullptr, slot);
     return true;
+}
+
+namespace {
+
+// Reads a PNG (or any picture format Windows knows) as RGBA with the Windows Imaging Component.
+bool load_picture(const std::filesystem::path& file, UINT* w, UINT* h, std::vector<uint8_t>* rgba) {
+    static const bool com = [] {
+        const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        return SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
+    }();
+    if (!com) return false;
+    ComPtr<IWICImagingFactory> factory;
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ComPtr<IWICFormatConverter> converter;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) ||
+        FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)) ||
+        FAILED(converter->GetSize(w, h)))
+        return false;
+    rgba->resize(size_t(*w) * size_t(*h) * 4);
+    return SUCCEEDED(converter->CopyPixels(nullptr, *w * 4, UINT(rgba->size()), rgba->data()));
+}
+
+}  // namespace
+
+void Presenter::upload_hd(UINT frame) {
+    if (!hd_) return;
+    auto pending = hd_->take_pending();
+    if (pending.empty()) return;
+    if (pending.size() > 64) pending.resize(64);  // a large batch is spread over a few frames
+    if (atlas_readable_) {
+        const auto b = transition(atlas_.Get(), kPictureReadable, D3D12_RESOURCE_STATE_COPY_DEST);
+        list_->ResourceBarrier(1, &b);
+    }
+    const UINT k = HdSprites::kScale;
+    for (const auto& p : pending) {
+        UINT w = 0, h = 0;
+        std::vector<uint8_t> rgba;
+        if (!load_picture(p.file, &w, &h, &rgba) || w != UINT(p.width) * k || h != UINT(p.rows) * k) {
+            hd_->failed(p.slot);
+            continue;
+        }
+        // Sprites are packed in rows ("shelves") with a gap of one original pixel between them.
+        const UINT cw = UINT(p.width) + 1, ch = UINT(p.rows) + 1;
+        if (shelf_x_ + cw > kAtlasCells) {
+            shelf_x_ = 0;
+            shelf_y_ += shelf_height_;
+            shelf_height_ = 0;
+        }
+        if (shelf_y_ + ch > kAtlasCells) {
+            hd_->failed(p.slot);  // the atlas is full
+            continue;
+        }
+        const UINT x = shelf_x_, y = shelf_y_;
+        shelf_x_ += cw;
+        shelf_height_ = std::max(shelf_height_, ch);
+
+        const UINT pitch = (w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+        D3D12_HEAP_PROPERTIES uh{};
+        uh.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = UINT64(pitch) * h;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> buffer;
+        uint8_t* mapped = nullptr;
+        D3D12_RANGE none{0, 0};
+        if (FAILED(device_->CreateCommittedResource(&uh, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer))) ||
+            FAILED(buffer->Map(0, &none, reinterpret_cast<void**>(&mapped)))) {
+            hd_->failed(p.slot);
+            continue;
+        }
+        for (UINT row = 0; row < h; row++) std::memcpy(mapped + size_t(row) * pitch, rgba.data() + size_t(row) * w * 4, size_t(w) * 4);
+        buffer->Unmap(0, nullptr);
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = atlas_.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = buffer.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, w, h, 1, pitch};
+        list_->CopyTextureRegion(&dst, x * k, y * k, 0, &src, nullptr);
+        atlas_uploads_[frame].push_back(buffer);
+        hd_->placed(p.slot, uint16_t(x), uint16_t(y));
+    }
+    const auto b = transition(atlas_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, kPictureReadable);
+    list_->ResourceBarrier(1, &b);
+    atlas_readable_ = true;
 }
 
 void Presenter::create_targets() {
@@ -371,20 +500,24 @@ RECT Presenter::picture_rect() const {
     return r;
 }
 
-void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::path* capture) {
+void Presenter::draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, const std::filesystem::path* capture) {
     if (!swap_ || width_ == 0) return;
     const UINT i = swap_->GetCurrentBackBufferIndex();
     if (fence_->GetCompletedValue() < fence_values_[i]) {
         fence_->SetEventOnCompletion(fence_values_[i], fence_event_);
         WaitForSingleObject(fence_event_, INFINITE);
     }
-    std::memcpy(upload_ptr_[i], rgba, kWidth * 4 * kHeight);
+    atlas_uploads_[i].clear();
+    const size_t picture_bytes = size_t(kWidth) * 4 * kHeight;
+    std::memcpy(upload_ptr_[i], rgba, picture_bytes);
+    std::memcpy(upload_ptr_[i] + picture_bytes, hd_refs, picture_bytes);
     allocators_[i]->Reset();
     list_->Reset(allocators_[i].Get(), pso_.Get());
 
     if (texture_readable_) {
-        const auto b = transition(texture_.Get(), kPictureReadable, D3D12_RESOURCE_STATE_COPY_DEST);
-        list_->ResourceBarrier(1, &b);
+        const D3D12_RESOURCE_BARRIER b[2] = {transition(texture_.Get(), kPictureReadable, D3D12_RESOURCE_STATE_COPY_DEST),
+                                             transition(refs_.Get(), kPictureReadable, D3D12_RESOURCE_STATE_COPY_DEST)};
+        list_->ResourceBarrier(2, b);
     }
     D3D12_TEXTURE_COPY_LOCATION dst{};
     dst.pResource = texture_.Get();
@@ -394,12 +527,18 @@ void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::pa
     src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, kWidth, kHeight, 1, kWidth * 4};
     list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    D3D12_RESOURCE_BARRIER barriers[2] = {
+    dst.pResource = refs_.Get();
+    src.PlacedFootprint.Offset = picture_bytes;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_UINT;
+    list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_RESOURCE_BARRIER barriers[3] = {
         transition(texture_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, kPictureReadable),
+        transition(refs_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, kPictureReadable),
         transition(targets_[i].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET),
     };
-    list_->ResourceBarrier(2, barriers);
+    list_->ResourceBarrier(3, barriers);
     texture_readable_ = true;
+    upload_hd(i);
 
     // The network runs only when the picture has changed since its last run.
     const bool use_ai = filter == kAiFilter && ai_.ready();

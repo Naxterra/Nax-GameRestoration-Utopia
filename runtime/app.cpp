@@ -18,6 +18,7 @@
 
 #include "audio.h"
 #include "game.h"
+#include "hd_sprites.h"
 #include "machine.h"
 #include "png.h"
 #include "presenter.h"
@@ -76,7 +77,10 @@ const uint16_t kArrow[32] = {
     0x0000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7C00, 0x7E00, 0x7F00, 0x7F80, 0x7C00, 0x6C00, 0x4600, 0x0600, 0x0300, 0x0300, 0x0000,
 };
 
-void build_frame(nax::Machine& m, std::vector<uint32_t>& out) {
+// Converts video memory to RGBA with the mouse pointer drawn in, and fills refs with the upscaled sprite
+// picture for each pixel (none where the pointer is, so it stays on top).
+void build_frame(nax::Machine& m, nax::HdSprites& hd, std::vector<uint32_t>& out, std::vector<uint32_t>& refs) {
+    refs.assign(nax::Presenter::kWidth * nax::Presenter::kHeight, nax::HdSprites::kNone);
     out.assign(nax::Presenter::kWidth * nax::Presenter::kHeight, 0xFF000000u);
     if (m.video_mode != 0x13) return;
     uint32_t palette[256];
@@ -86,6 +90,7 @@ void build_frame(nax::Machine& m, std::vector<uint32_t>& out) {
     }
     const uint8_t* vram = m.vram();
     for (size_t i = 0; i < out.size(); i++) out[i] = palette[vram[i]];
+    hd.frame(m, refs.data());
     if (m.cursor_visible != 0) return;
     const uint16_t* shape = m.custom_cursor ? m.cursor_shape : kArrow;
     const int hx = m.custom_cursor ? m.cursor_hot_x / 2 : 0, hy = m.custom_cursor ? m.cursor_hot_y : 0;
@@ -98,6 +103,7 @@ void build_frame(nax::Machine& m, std::vector<uint32_t>& out) {
             if (x < 0 || x >= 320) continue;
             const bool screen = (shape[row] >> (15 - col)) & 1, cursor = (shape[16 + row] >> (15 - col)) & 1;
             uint32_t& p = out[size_t(y) * 320 + size_t(x)];
+            if (!screen || cursor) refs[size_t(y) * 320 + size_t(x)] = nax::HdSprites::kNone;
             if (!screen) p = cursor ? 0xFFFFFFFFu : 0xFF000000u;
             else if (cursor) p ^= 0x00FFFFFFu;
         }
@@ -505,6 +511,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     std::string audio_error;
     // The chip's timers answer even without a sound device, so the game's AdLib detection still succeeds.
     machine.audio = &audio;
+    // Every sprite the game draws is saved once in the "original" folder next to the saves; upscaled pictures
+    // in the "upscaled" folder replace them in the AI filter.
+    nax::HdSprites hd;
+    hd.set_folder(saves / L"hd");
+    machine.hd = &hd;
+    presenter.set_hd(&hd);
     if (options.count(L"record-audio")) {
         if (options.count(L"mute")) machine.log("--record-audio is ignored because --mute turns sound output off");
         else audio.record(options.at(L"record-audio"));
@@ -523,7 +535,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     const long shot_every = options.count(L"shot-every") ? std::wcstol(options.at(L"shot-every").c_str(), nullptr, 10) : 0;
     const long quit_after = options.count(L"quit-after") ? std::wcstol(options.at(L"quit-after").c_str(), nullptr, 10) : 0;
     auto next_shot = start + std::chrono::milliseconds(shot_every);
-    std::vector<uint32_t> frame;
+    std::vector<uint32_t> frame, refs;
     MSG msg{};
     bool quit = false;
     while (!quit) {
@@ -540,7 +552,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         }
         if (quit_after > 0 && now - start > std::chrono::milliseconds(quit_after)) machine.request_stop();
         flush_pending_motion();
-        build_frame(machine, frame);
+        build_frame(machine, hd, frame, refs);
         std::filesystem::path shot;
         if (g_shot_requested) {
             g_shot_requested = false;
@@ -550,12 +562,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             swprintf(name, 32, L"shot-%04d.png", g_shot_number++);
             shot = g_shots / name;
         }
-        presenter.draw(frame.data(), g_filter, shot.empty() ? nullptr : &shot);
+        presenter.draw(frame.data(), refs.data(), g_filter, shot.empty() ? nullptr : &shot);
         if (!shot.empty() && g_filter == nax::Presenter::kAiFilter) machine.log("AI filter: %.1f ms of GPU time per picture", presenter.ai_gpu_ms());
     }
     machine.request_stop();
     game_thread.join();
     machine.audio = nullptr;
+    machine.hd = nullptr;
     audio.stop();
     if (script_thread.joinable()) script_thread.join();
     g_machine = nullptr;

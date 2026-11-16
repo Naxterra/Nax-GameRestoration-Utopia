@@ -9,6 +9,8 @@ translated stops the program with a message that names it.
 
 With --flat the program is a raw binary loaded at offset 0 of its segment, as the sound drivers are.
 A seeds file lists extra entry points, one "segment:offset" in hex per line, relative to the load segment.
+A hooks file lists "segment:offset function" lines: the named C++ function, which the game provides, is called
+with the machine just before the instruction at that address runs, so it can observe the program's state.
 """
 import argparse
 import binascii
@@ -35,6 +37,11 @@ CONDITIONS = {
     "jl": "(c.sf != c.of)", "jge": "(c.sf == c.of)", "jle": "(c.zf || c.sf != c.of)", "jg": "(!c.zf && c.sf == c.of)",
     "jcxz": "(c.c.x == 0)",
 }
+# Slots of Cpu::org, which follows where the value in each byte register came from.
+BYTE_SLOTS = {"al": [0], "cl": [1], "dl": [2], "bl": [3], "ah": [4], "ch": [5], "dh": [6], "bh": [7],
+              "ax": [0, 4], "cx": [1, 5], "dx": [2, 6], "bx": [3, 7], "eax": [0, 4], "ecx": [1, 5], "edx": [2, 6], "ebx": [3, 7]}
+# Instructions whose origin handling is part of their own translation.
+COPIES = ("mov", "lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw")
 ARITH = {"add": "add", "adc": "add", "sub": "sub", "sbb": "sub", "cmp": "sub"}
 LOGIC = {"and": "&", "or": "|", "xor": "^", "test": "&"}
 SHIFTS = {"shl": "shl", "sal": "shl", "shr": "shr", "sar": "sar", "rol": "rol", "ror": "ror", "rcl": "rcl", "rcr": "rcr"}
@@ -45,7 +52,9 @@ class EmitError(Exception):
 
 
 class Emitter:
-    def __init__(self, disc, name):
+    def __init__(self, disc, name, trace=False, hooks=None):
+        self.trace = trace
+        self.hooks = hooks or {}
         self.disc = disc
         self.image = disc.image
         self.name = name
@@ -121,7 +130,19 @@ class Emitter:
         nxt = (ip + insn.size) & 0xFFFF
         temps = []
         body = self.body(cs, ip, insn, lin, m, ops, nxt, temps)
-        return " ".join(temps + [body])
+        writer = [f"m.writer = 0x{lin:05x};"] if self.trace else []
+        hook = [f"{self.hooks[(cs, ip)]}(m);"] if (cs, ip) in self.hooks else []
+        return " ".join(writer + hook + temps + self.forget_origins(insn) + [body])
+
+    def slots(self, insn, op):
+        return BYTE_SLOTS.get(insn.reg_name(op.reg), []) if op.type == x86.X86_OP_REG else []
+
+    def forget_origins(self, insn):
+        """Any instruction other than a plain copy computes the registers it writes, so their origin is lost."""
+        if insn.mnemonic.replace("rep ", "") in COPIES:
+            return []
+        written = {s for r in insn.regs_access()[1] for s in BYTE_SLOTS.get(insn.reg_name(r), [])}
+        return [f"c.org[{s}] = 0;" for s in sorted(written)]
 
     def body(self, cs, ip, insn, lin, m, ops, nxt, temps):
         rep = m.startswith("rep ")
@@ -130,9 +151,27 @@ class Emitter:
         if m == "nop":
             return ""
         if m == "mov":
-            src, _, _ = self.operand(insn, ops[1], lin, temps)
+            src, _, size = self.operand(insn, ops[1], lin, temps)
             _, put, _ = self.operand(insn, ops[0], lin, temps)
-            return put(src)
+            src_slots, dst_slots = self.slots(insn, ops[1]), self.slots(insn, ops[0])
+            bits = 8 if size == 1 else 16
+            if ops[0].type == x86.X86_OP_MEM:
+                if not src_slots:
+                    return put(src)
+                n = len(temps) - 1
+                origins = ", ".join(f"c.org[{s}]" for s in src_slots)
+                return f"m.wr{bits}o(s{n}, o{n}, {src}, {origins});"
+            if not dst_slots:
+                return put(src)
+            if ops[1].type == x86.X86_OP_MEM:
+                origins = [f"m.org(s0, (uint16_t)(o0 + {k}))" for k in range(len(dst_slots))]
+            elif src_slots:
+                origins = [f"c.org[{s}]" for s in src_slots]
+            else:
+                origins = ["0"] * len(dst_slots)
+            keep = " ".join(f"const uint32_t g{k} = {v};" for k, v in enumerate(origins))
+            assign = " ".join(f"c.org[{s}] = g{k};" for k, s in enumerate(dst_slots))
+            return f"{{ {keep} {put(src)} {assign} }}"
         if m in ARITH or m in LOGIC:
             a, put, size = self.operand(insn, ops[0], lin, temps)
             b, _, _ = self.operand(insn, ops[1], lin, temps)
@@ -263,12 +302,19 @@ class Emitter:
         step = f"(c.df ? -{width} : {width})"
         if m.startswith("lods"):
             reg = "c.a.l" if width == 1 else "c.a.x"
-            one = f"{reg} = m.rd{bits}({src_seg}, c.si); c.si = (uint16_t)(c.si + {step});"
+            origins = "c.org[0] = m.org(%s, c.si);" % src_seg
+            if width == 2:
+                origins += " c.org[4] = m.org(%s, (uint16_t)(c.si + 1));" % src_seg
+            one = f"{reg} = m.rd{bits}({src_seg}, c.si); {origins} c.si = (uint16_t)(c.si + {step});"
         elif m.startswith("stos"):
             reg = "c.a.l" if width == 1 else "c.a.x"
-            one = f"m.wr{bits}(c.es, c.di, {reg}); c.di = (uint16_t)(c.di + {step});"
+            origins = "c.org[0]" if width == 1 else "c.org[0], c.org[4]"
+            one = f"m.wr{bits}o(c.es, c.di, {reg}, {origins}); c.di = (uint16_t)(c.di + {step});"
         else:
-            one = (f"m.wr{bits}(c.es, c.di, m.rd{bits}({src_seg}, c.si)); "
+            origins = f"m.org({src_seg}, c.si)"
+            if width == 2:
+                origins += f", m.org({src_seg}, (uint16_t)(c.si + 1))"
+            one = (f"m.wr{bits}o(c.es, c.di, m.rd{bits}({src_seg}, c.si), {origins}); "
                    f"c.si = (uint16_t)(c.si + {step}); c.di = (uint16_t)(c.di + {step});")
         if rep:
             return f"while (c.c.x != 0) {{ {one} c.c.x--; }}"
@@ -283,6 +329,8 @@ class Emitter:
             f"// Generated by tools/recomp/emit.py from {source_name}. This file is derived from the original program,",
             "// so it stays on the machine of the user who owns that program and is never committed or distributed.",
             '#include "runtime/cpu_ops.h"',
+            "",
+        ] + [f"void {name}(nax::Machine& m);" for name in sorted(set(self.hooks.values()))] + [
             "",
             f"static void run_{self.name}(nax::Machine& m, uint16_t B) {{",
             "    nax::Cpu& c = m.c;",
@@ -342,6 +390,21 @@ def read_seeds(path):
     return seeds
 
 
+def read_hooks(path):
+    hooks = {}
+    if path and os.path.exists(path):
+        with open(path, encoding="ascii") as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if line:
+                    address, name = line.split()
+                    seg, off = address.split(":")
+                    if not name.isidentifier():
+                        raise ValueError(f"bad hook name {name}")
+                    hooks[(int(seg, 16), int(off, 16))] = name
+    return hooks
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("program")
@@ -349,6 +412,8 @@ def main():
     parser.add_argument("output")
     parser.add_argument("--flat", action="store_true")
     parser.add_argument("--seeds")
+    parser.add_argument("--hooks")
+    parser.add_argument("--trace", action="store_true", help="record which instruction wrote each byte, for analysis")
     args = parser.parse_args()
     with open(args.program, "rb") as f:
         raw = f.read()
@@ -360,7 +425,11 @@ def main():
     for seg, off in read_seeds(args.seeds):
         disc.add(seg, off, "function")
     disc.run()
-    emitter = Emitter(disc, args.name)
+    hooks = read_hooks(args.hooks)
+    missing = [f"{s:04x}:{o:04x}" for s, o in hooks if (s, o) not in {(cs, ip) for cs, ip, _ in disc.code.values()}]
+    if missing:
+        sys.exit(f"Cannot translate {args.program}: hook addresses are not instructions: {', '.join(missing)}")
+    emitter = Emitter(disc, args.name, args.trace, hooks)
     signature = raw[:64] if args.flat else b""
     try:
         text = emitter.module(os.path.basename(args.program), binascii.crc32(raw), args.flat, signature)

@@ -31,7 +31,7 @@ constexpr double kPitHz = 1193181.666;
 
 }  // namespace
 
-Machine::Machine() : mem(kMemorySize, 0) {
+Machine::Machine() : mem(kMemorySize, 0), origin(kMemorySize, 0), written_by(kMemorySize, 0) {
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     qpc_freq_ = f.QuadPart;

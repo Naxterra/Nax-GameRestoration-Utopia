@@ -1,4 +1,4 @@
-// Tests for the runtime's DOS file services. Each test drives INT 21h directly on a fresh machine whose game
+// Tests for the runtime's DOS file services, sound timing and sprite tracking. Each test drives INT 21h directly on a fresh machine whose game
 // folder and save folder are temporary directories, and prints one line per test with PASS or FAIL.
 #include <windows.h>
 
@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "runtime/audio.h"
+#include "runtime/hd_sprites.h"
 #include "runtime/machine.h"
 
 namespace fs = std::filesystem;
@@ -88,6 +89,20 @@ bool no_temporary_files(const fs::path& dir) {
     for (const auto& e : fs::recursive_directory_iterator(dir, ec))
         if (e.path().wstring().find(L".nax-tmp") != std::wstring::npos) return false;
     return true;
+}
+
+// A 32x2 sprite at linear 30000h whose bottom row starts with the colours 1 and 2, drawn with colour base 40h
+// so that its bottom row starts at offset 3205 of a buffer at 60000h, and that buffer copied to the screen.
+constexpr uint32_t kSpriteData = 0x30000, kBuffer = 0x60000, kDest = kBuffer + 10 * 320 + 5;
+void draw_test_sprite(nax::Machine& m, nax::HdSprites& hd) {
+    m.mem[kSpriteData] = 0x12;
+    hd.draw(m, kSpriteData, 32, 2, kDest, 0x40);
+    for (uint32_t i = 0; i < 64000; i++) {
+        m.mem[0xA0000 + i] = m.mem[kBuffer + i];
+        m.origin[0xA0000 + i] = kBuffer + i + 1;
+    }
+    m.mem[0xA0000 + 10 * 320 + 5] = 0x41;
+    m.mem[0xA0000 + 10 * 320 + 6] = 0x42;
 }
 
 struct Test {
@@ -232,6 +247,50 @@ const std::vector<Test> kTests = {
          float out[512];
          audio.render(out, 512, audio.next_until(stalled, 512));
          return span > 0 && audio.render_time() == stalled - audio.latency();
+     }},
+    {"copied_byte_keeps_the_address_it_was_computed_at", [] {
+         nax::Machine m;
+         m.wr8(0x1000, 0x0010, 7);
+         m.wr8o(0xA000, 0x0000, m.rd8(0x1000, 0x0010), m.org(0x1000, 0x0010));
+         m.wr8o(0xA000, 0x0001, 9, 0);
+         return m.origin[0xA0000] == 0x10010 + 1 && m.origin[0xA0001] == 0xA0001 + 1;
+     }},
+    {"sprite_pixel_on_screen_points_into_its_upscaled_picture", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         draw_test_sprite(m, hd);
+         hd.placed(0, 100, 200);
+         std::vector<uint32_t> refs(64000);
+         hd.frame(m, refs.data());
+         const uint32_t at = 10 * 320 + 5;
+         return hd.sprite_count() == 1 && refs[at] == (100u | (201u << 16)) && refs[at + 1] == (101u | (201u << 16)) &&
+                refs[at + 2] == nax::HdSprites::kNone;
+     }},
+    {"sprite_pixel_drawn_over_or_without_upscaled_picture_keeps_the_original", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         draw_test_sprite(m, hd);
+         std::vector<uint32_t> refs(64000);
+         hd.frame(m, refs.data());
+         const bool none_before = refs[10 * 320 + 5] == nax::HdSprites::kNone;
+         hd.placed(0, 0, 0);
+         m.mem[0xA0000 + 10 * 320 + 5] = 0x07;  // something else was drawn there afterwards
+         hd.frame(m, refs.data());
+         return none_before && refs[10 * 320 + 5] == nax::HdSprites::kNone && refs[10 * 320 + 6] != nax::HdSprites::kNone;
+     }},
+    {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
+         Fixture f;
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         draw_test_sprite(f.m, hd);
+         draw_test_sprite(f.m, hd);
+         std::vector<fs::path> files;
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"original")) files.push_back(e.path());
+         if (files.size() != 1 || hd.sprite_count() != 1) return false;
+         std::ifstream in(files[0], std::ios::binary);
+         std::string head(26, char(0));
+         in.read(head.data(), 26);
+         return uint8_t(head[25]) == 6;  // colour type RGBA
      }},
 };
 

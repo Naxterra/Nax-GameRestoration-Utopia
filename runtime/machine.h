@@ -17,6 +17,7 @@
 namespace nax {
 
 class Audio;
+class HdSprites;
 class Machine;
 
 union Reg16 {
@@ -33,6 +34,8 @@ struct Cpu {
     bool cf = false, zf = false, sf = false, of = false, df = false, iflag = true, tf = false;
     // No translated instruction reads PF or AF. They are kept so that a pushed flags word comes back unchanged.
     bool pf = false, af = false;
+    // The origin of the value in each byte register, in the order al, cl, dl, bl, ah, ch, dh, bh (see Machine::origin).
+    uint32_t org[8]{};
 
     uint16_t flags() const {
         return (uint16_t)(0xF002 | (cf ? 0x001 : 0) | (pf ? 0x004 : 0) | (af ? 0x010 : 0) | (zf ? 0x040 : 0) |
@@ -77,12 +80,39 @@ public:
 
     Cpu c;
     std::vector<uint8_t> mem;
+    // For every byte of memory, where its value came from: 1 + the linear address at which the value was
+    // produced, or 0 when unknown. A value that the program computes and stores gets the address it is stored
+    // at, and plain copies (mov, lods, stos, movs) carry the origin along. So each pixel in video memory names
+    // the byte of the unpacked graphic it was copied from, which lets the presenter draw a high-resolution
+    // version of that graphic in its place.
+    std::vector<uint32_t> origin;
+    // Only in a build translated with --trace: the linear address of the instruction that last wrote each byte.
+    uint32_t writer = 0;
+    std::vector<uint32_t> written_by;
 
     // Memory and stack. Addresses wrap at 1 MB as on a PC with the A20 line disabled.
-    uint8_t rd8(uint16_t s, uint16_t o) const { return mem[((uint32_t(s) << 4) + o) & 0xFFFFF]; }
+    static uint32_t linear(uint16_t s, uint16_t o) { return ((uint32_t(s) << 4) + o) & 0xFFFFF; }
+    uint8_t rd8(uint16_t s, uint16_t o) const { return mem[linear(s, o)]; }
     uint16_t rd16(uint16_t s, uint16_t o) const { return uint16_t(rd8(s, o) | (rd8(s, uint16_t(o + 1)) << 8)); }
-    void wr8(uint16_t s, uint16_t o, uint8_t v) { mem[((uint32_t(s) << 4) + o) & 0xFFFFF] = v; }
+    uint32_t org(uint16_t s, uint16_t o) const { return origin[linear(s, o)]; }
+    void wr8(uint16_t s, uint16_t o, uint8_t v) {
+        const uint32_t a = linear(s, o);
+        mem[a] = v;
+        origin[a] = a + 1;
+        written_by[a] = writer;
+    }
     void wr16(uint16_t s, uint16_t o, uint16_t v) { wr8(s, o, uint8_t(v)); wr8(s, uint16_t(o + 1), uint8_t(v >> 8)); }
+    // Stores a copied value together with its origin; a value without a known origin starts here.
+    void wr8o(uint16_t s, uint16_t o, uint8_t v, uint32_t from) {
+        const uint32_t a = linear(s, o);
+        mem[a] = v;
+        origin[a] = from ? from : a + 1;
+        written_by[a] = writer;
+    }
+    void wr16o(uint16_t s, uint16_t o, uint16_t v, uint32_t lo, uint32_t hi) {
+        wr8o(s, o, uint8_t(v), lo);
+        wr8o(s, uint16_t(o + 1), uint8_t(v >> 8), hi);
+    }
     void push(uint16_t v) { c.sp = uint16_t(c.sp - 2); wr16(c.ss, c.sp, v); }
     uint16_t pop() { const uint16_t v = rd16(c.ss, c.sp); c.sp = uint16_t(c.sp + 2); return v; }
     void iret() { c.ip = pop(); c.cs = pop(); c.set_flags(pop()); }
@@ -115,6 +145,8 @@ public:
 
     // Sound output, or null when no sound device is available.
     Audio* audio = nullptr;
+    // The high-resolution sprite tracker, or null when it is not used.
+    HdSprites* hd = nullptr;
 
     // Shared with the window thread.
     uint8_t dac[256][3]{};  // VGA palette, 6 bits per component

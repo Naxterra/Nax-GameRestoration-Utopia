@@ -1,6 +1,7 @@
 // BIOS video (INT 10h), keyboard (INT 16h), clock (INT 1Ah) and mouse driver (INT 33h) services.
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "machine.h"
@@ -13,7 +14,10 @@ void Machine::int10() {
         const uint8_t mode = c.a.l & 0x7F;
         video_mode = mode;
         wr8(0x40, 0x49, mode);
-        if (mode == 0x13 && !(c.a.l & 0x80)) std::memset(&mem[0xA0000], 0, 64000);
+        if (mode == 0x13 && !(c.a.l & 0x80)) {
+            std::memset(&mem[0xA0000], 0, 64000);
+            std::fill(origin.begin() + 0xA0000, origin.begin() + 0xA0000 + 64000, 0u);
+        }
         log("Video mode %02x", mode);
         return;
     }

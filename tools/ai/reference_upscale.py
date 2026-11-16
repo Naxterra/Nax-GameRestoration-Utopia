@@ -12,7 +12,8 @@ import zlib
 import numpy as np
 
 
-def read_png(path):
+def read_png(path, alpha=False):
+    """Reads an unfiltered 8-bit RGB or RGBA PNG; with alpha the result keeps a fourth channel (255 for RGB)."""
     with open(path, "rb") as f:
         data = f.read()
     pos, chunks, width, height, colour = 8, b"", 0, 0, 0
@@ -33,19 +34,23 @@ def read_png(path):
         if line[0] != 0:
             raise ValueError("only unfiltered PNG rows are supported")
         rows.append(np.frombuffer(line[1:], dtype=np.uint8))
-    image = np.stack(rows).reshape(height, width, channels)[:, :, :3]
-    return image
+    image = np.stack(rows).reshape(height, width, channels)
+    if alpha:
+        if channels == 3:
+            image = np.concatenate([image, np.full((height, width, 1), 255, np.uint8)], axis=2)
+        return image
+    return image[:, :, :3]
 
 
 def write_png(path, image):
-    height, width, _ = image.shape
+    height, width, channels = image.shape
     raw = b"".join(b"\0" + image[y].astype(np.uint8).tobytes() for y in range(height))
 
     def chunk(kind, body):
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
 
     with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6 if channels == 4 else 2, 0, 0, 0)))
         f.write(chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 

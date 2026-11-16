@@ -1,4 +1,4 @@
-// Writes uncompressed PNG screenshots, enlarged by a whole factor.
+// Writes uncompressed PNG pictures (screenshots and sprites), enlarged by a whole factor.
 #pragma once
 
 #include <cstdint>
@@ -8,7 +8,8 @@
 
 namespace nax {
 
-inline bool write_png(const std::filesystem::path& path, const uint32_t* rgba, unsigned w, unsigned h, unsigned scale) {
+// With alpha the picture keeps its transparency (the top byte of each pixel), otherwise it is stored as RGB.
+inline bool write_png(const std::filesystem::path& path, const uint32_t* rgba, unsigned w, unsigned h, unsigned scale, bool alpha = false) {
     auto crc = [](const uint8_t* p, size_t n, uint32_t c = 0xFFFFFFFFu) {
         for (size_t i = 0; i < n; i++) {
             c ^= p[i];
@@ -18,7 +19,7 @@ inline bool write_png(const std::filesystem::path& path, const uint32_t* rgba, u
     };
     const unsigned sw = w * scale, sh = h * scale;
     std::vector<uint8_t> raw;
-    raw.reserve(size_t(sh) * (sw * 3 + 1));
+    raw.reserve(size_t(sh) * (sw * (alpha ? 4 : 3) + 1));
     for (unsigned y = 0; y < sh; y++) {
         raw.push_back(0);
         for (unsigned x = 0; x < sw; x++) {
@@ -26,6 +27,7 @@ inline bool write_png(const std::filesystem::path& path, const uint32_t* rgba, u
             raw.push_back(uint8_t(p));
             raw.push_back(uint8_t(p >> 8));
             raw.push_back(uint8_t(p >> 16));
+            if (alpha) raw.push_back(uint8_t(p >> 24));
         }
     }
     std::vector<uint8_t> z = {0x78, 0x01};
@@ -65,7 +67,7 @@ inline bool write_png(const std::filesystem::path& path, const uint32_t* rgba, u
     be32(&ihdr[0], sw);
     be32(&ihdr[4], sh);
     ihdr[8] = 8;
-    ihdr[9] = 2;
+    ihdr[9] = alpha ? 6 : 2;
     chunk("IHDR", ihdr);
     chunk("IDAT", z);
     chunk("IEND", {});

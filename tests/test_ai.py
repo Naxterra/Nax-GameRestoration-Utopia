@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import convert_realesrgan  # noqa: E402
 import reference_upscale  # noqa: E402
+import upscale_sprites  # noqa: E402
 
 
 class FakeStorage:
@@ -144,6 +145,30 @@ class ReferenceTests(unittest.TestCase):
                 f.write(b"NOTAFILE" + struct.pack("<3I", 2, 16, 4))
             with self.assertRaises(ValueError):
                 reference_upscale.load_weights(path)
+
+
+class SpriteTests(unittest.TestCase):
+    def test_transparent_pixels_take_colour_of_visible_neighbours_and_visible_ones_stay(self):
+        rgb = np.zeros((3, 4, 3), np.uint8)
+        rgb[1, 1] = (200, 100, 50)
+        rgb[1, 2] = (100, 50, 0)
+        visible = np.zeros((3, 4), bool)
+        visible[1, 1:3] = True
+        filled = upscale_sprites.fill_transparent(rgb, visible)
+        self.assertEqual(filled[1, 1].tolist(), [200, 100, 50])
+        self.assertEqual(filled[1, 0].tolist(), [200, 100, 50])
+        self.assertEqual(filled[1, 3].tolist(), [100, 50, 0])
+        self.assertTrue((filled[0, 1:3] > 0).all())
+
+    def test_upscaled_sprite_is_four_times_as_large_and_keeps_its_transparency(self):
+        layers = [(np.zeros((48, 3, 3, 3), np.float32), np.zeros(48, np.float32), None)]
+        rgba = np.zeros((5, 6, 4), np.uint8)
+        rgba[2, 3] = (10, 20, 30, 255)
+        big = upscale_sprites.upscale_sprite(layers, 4, rgba)
+        self.assertEqual(big.shape, (20, 24, 4))
+        self.assertEqual(big[8:12, 12:16, 3].min(), 255)
+        self.assertEqual(big[:8, :, 3].max(), 0)
+        self.assertEqual(big[9, 13, :3].tolist(), [10, 20, 30])
 
 
 if __name__ == "__main__":

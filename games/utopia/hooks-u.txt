@@ -1,0 +1,6 @@
+# Places in u.mdg where the runtime watches the game draw its 32-pixel-wide map sprites, so that the AI filter
+# can draw a high-resolution version of each sprite in its place. All three routines unpack 4-bit pixels, skip
+# colour 0 as transparent, add a colour base and draw the rows from the bottom up.
+0ffe:220a utopia_sprite_rows_in_cx
+0ffe:2b10 utopia_sprite_rows_in_cx_es_in_ax
+0ffe:3364 utopia_sprite_rows_in_bp

@@ -41,9 +41,10 @@ public:
 
 private:
     static constexpr UINT kFrames = 2;
-    static constexpr UINT kAtlasCells = 1024;  // the atlas holds 1024x1024 original pixels, each as 4x4 texels
+    static constexpr UINT kAtlasCells = 1024;  // the atlas holds 1024x1024 original pixels, each as 8x8 texels
     void wait_idle();
     void upload_hd(UINT frame);
+    bool create_atlas();
     void create_targets();
 
     HWND hwnd_ = nullptr;
@@ -75,6 +76,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> atlas_, refs_;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> atlas_uploads_[kFrames];  // kept until the frame has run
     bool atlas_readable_ = false;
+    bool atlas_failed_ = false;
     UINT shelf_x_ = 0, shelf_y_ = 0, shelf_height_ = 0;
 };
 

@@ -115,7 +115,7 @@ float3 ai_picture(float2 uv) {
     uint r = refs.Load(int3(p, 0));
     if (r != 0xFFFFFFFFu) {
         float2 cell = float2(r & 0xFFFF, r >> 16);
-        return atlas.SampleLevel(smooth, (cell + (s - p)) * 4 / 4096.0, 0).rgb;
+        return atlas.SampleLevel(smooth, (cell + (s - p)) / 1024.0, 0).rgb;  // the atlas spans 1024 original pixels
     }
     return ai_shapes(uv);
 }
@@ -307,13 +307,10 @@ bool Presenter::init(HWND hwnd, std::string* error) {
     }
 
     {
-        // The atlas of upscaled sprite pictures and, per screen pixel, the atlas cell to draw there.
+        // Per screen pixel, the atlas cell of its upscaled sprite picture. The atlas itself takes 256 MB of video
+        // memory, so it is only created once there is an upscaled picture to show (see create_atlas); until then
+        // its slot holds an empty view.
         const UINT increment = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        D3D12_RESOURCE_DESC ad = td;
-        ad.Width = ad.Height = kAtlasCells * HdSprites::kScale;
-        if (!check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &ad, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&atlas_)),
-                   "Creating the sprite atlas", error))
-            return false;
         D3D12_RESOURCE_DESC refs_desc = td;
         refs_desc.Format = DXGI_FORMAT_R32_UINT;
         if (!check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &refs_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&refs_)),
@@ -321,7 +318,12 @@ bool Presenter::init(HWND hwnd, std::string* error) {
             return false;
         auto slot = srv_heap_->GetCPUDescriptorHandleForHeapStart();
         slot.ptr += 2 * SIZE_T(increment);
-        device_->CreateShaderResourceView(atlas_.Get(), nullptr, slot);
+        D3D12_SHADER_RESOURCE_VIEW_DESC empty{};
+        empty.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        empty.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        empty.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        empty.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(nullptr, &empty, slot);
         slot.ptr += increment;
         device_->CreateShaderResourceView(refs_.Get(), nullptr, slot);
     }
@@ -381,22 +383,88 @@ bool load_picture(const std::filesystem::path& file, UINT* w, UINT* h, std::vect
     return SUCCEEDED(converter->CopyPixels(nullptr, *w * 4, UINT(rgba->size()), rgba->data()));
 }
 
+// Doubles an RGBA picture with bilinear filtering, the sample positions lying between the source pixels.
+std::vector<uint8_t> double_size(const std::vector<uint8_t>& in, UINT w, UINT h) {
+    std::vector<uint8_t> out(size_t(w) * 2 * size_t(h) * 2 * 4);
+    for (UINT y = 0; y < h * 2; y++) {
+        const float sy = std::clamp((float(y) + 0.5f) / 2 - 0.5f, 0.0f, float(h - 1));
+        const UINT y0 = UINT(sy), y1 = std::min(y0 + 1, h - 1);
+        const float fy = sy - float(y0);
+        for (UINT x = 0; x < w * 2; x++) {
+            const float sx = std::clamp((float(x) + 0.5f) / 2 - 0.5f, 0.0f, float(w - 1));
+            const UINT x0 = UINT(sx), x1 = std::min(x0 + 1, w - 1);
+            const float fx = sx - float(x0);
+            for (int c = 0; c < 4; c++) {
+                auto at = [&](UINT px, UINT py) { return float(in[(size_t(py) * w + px) * 4 + size_t(c)]); };
+                const float v = (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) + (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy;
+                out[(size_t(y) * w * 2 + x) * 4 + size_t(c)] = uint8_t(v + 0.5f);
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace
+
+bool Presenter::create_atlas() {
+    if (atlas_) return true;
+    if (atlas_failed_) return false;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC ad{};
+    ad.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    ad.Width = ad.Height = kAtlasCells * HdSprites::kScale;
+    ad.DepthOrArraySize = 1;
+    ad.MipLevels = 1;
+    ad.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ad.SampleDesc.Count = 1;
+    if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &ad, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&atlas_)))) {
+        // Without the video memory for it the game simply keeps its other filters; the sprites stay as they are.
+        atlas_failed_ = true;
+        atlas_.Reset();
+        return false;
+    }
+    // Earlier frames may still be reading the empty view in this slot, so they finish before it changes.
+    wait_idle();
+    auto slot = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+    slot.ptr += 2 * SIZE_T(device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+    device_->CreateShaderResourceView(atlas_.Get(), nullptr, slot);
+    return true;
+}
 
 void Presenter::upload_hd(UINT frame) {
     if (!hd_) return;
     auto pending = hd_->take_pending();
     if (pending.empty()) return;
-    if (pending.size() > 64) pending.resize(64);  // a large batch is spread over a few frames
+    if (!create_atlas()) {
+        for (const auto& p : pending) hd_->failed(p.slot);
+        return;
+    }
     if (atlas_readable_) {
         const auto b = transition(atlas_.Get(), kPictureReadable, D3D12_RESOURCE_STATE_COPY_DEST);
         list_->ResourceBarrier(1, &b);
     }
     const UINT k = HdSprites::kScale;
+    // A large batch is spread over several frames: each frame loads pictures until about 16 MB have been
+    // uploaded. The rest stays pending and comes in the next frames.
+    size_t budget = size_t(16) << 20;
     for (const auto& p : pending) {
+        const size_t bytes = size_t(p.width) * k * size_t(p.rows) * k * 4;
+        if (bytes > budget && budget != (size_t(16) << 20)) break;
+        budget -= std::min(budget, bytes);
         UINT w = 0, h = 0;
         std::vector<uint8_t> rgba;
-        if (!load_picture(p.file, &w, &h, &rgba) || w != UINT(p.width) * k || h != UINT(p.rows) * k) {
+        if (!load_picture(p.file, &w, &h, &rgba)) {
+            hd_->failed(p.slot);
+            continue;
+        }
+        // Pictures four times as large are accepted too and doubled smoothly to the atlas resolution.
+        if (w * 2 == UINT(p.width) * k && h * 2 == UINT(p.rows) * k) {
+            rgba = double_size(rgba, w, h);
+            w *= 2;
+            h *= 2;
+        }
+        if (w != UINT(p.width) * k || h != UINT(p.rows) * k) {
             hd_->failed(p.slot);
             continue;
         }

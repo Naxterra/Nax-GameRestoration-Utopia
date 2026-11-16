@@ -188,6 +188,40 @@ class RrdbTests(unittest.TestCase):
 
 
 class SpriteTests(unittest.TestCase):
+    def test_picture_replaced_once_the_game_stops_reading_the_old_one(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            target, temporary = os.path.join(tmp, "a.png"), os.path.join(tmp, "a.png.part")
+            with open(target, "wb") as f:
+                f.write(b"old")
+            with open(temporary, "wb") as f:
+                f.write(b"new")
+            reader = open(target, "rb")  # held open like the game's picture decoder
+            threading.Timer(0.6, reader.close).start()
+            upscale_sprites.replace_file(temporary, target)
+            with open(target, "rb") as f:
+                self.assertEqual(f.read(), b"new")
+            self.assertFalse(os.path.exists(temporary))
+
+    def test_picture_that_cannot_be_replaced_leaves_no_temporary_file(self):
+        original_sleep = upscale_sprites.time.sleep
+        upscale_sprites.time.sleep = lambda _seconds: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                target, temporary = os.path.join(tmp, "a.png"), os.path.join(tmp, "a.png.part")
+                with open(target, "wb") as f:
+                    f.write(b"old")
+                with open(temporary, "wb") as f:
+                    f.write(b"new")
+                with open(target, "rb"):
+                    with self.assertRaises(PermissionError):
+                        upscale_sprites.replace_file(temporary, target)
+                self.assertFalse(os.path.exists(temporary))
+                with open(target, "rb") as f:
+                    self.assertEqual(f.read(), b"old")
+        finally:
+            upscale_sprites.time.sleep = original_sleep
+
     def test_transparent_pixels_take_colour_of_visible_neighbours_and_visible_ones_stay(self):
         rgb = np.zeros((3, 4, 3), np.uint8)
         rgb[1, 1] = (200, 100, 50)

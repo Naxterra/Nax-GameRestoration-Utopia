@@ -21,7 +21,7 @@ class Machine;
 
 class HdSprites {
 public:
-    static constexpr int kScale = 4;                 // the upscaled pictures are four times as large
+    static constexpr int kScale = 8;                 // the atlas holds pictures eight times as large (four is doubled)
     static constexpr uint32_t kNone = 0xFFFFFFFFu;  // a screen pixel without a high-resolution picture
 
     HdSprites();

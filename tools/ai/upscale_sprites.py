@@ -21,6 +21,7 @@ import argparse
 import glob
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -57,6 +58,24 @@ def fill_transparent(rgb, visible):
         rgb[grow] = total[grow] / count[grow][:, None]
         known = known | grow
     return rgb
+
+
+def replace_file(temporary, target):
+    """Moves a finished picture into place. The running game may be reading the old picture at that moment,
+    which Windows refuses for a short while, so it is tried again for a few seconds. If it still fails, the
+    temporary file is removed and the error is raised."""
+    for attempt in range(20):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError:
+            if attempt == 19:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.25)
 
 
 def load_model(path):
@@ -106,7 +125,7 @@ def main():
         # Written under another name first, so the running game never reads a half-written picture.
         temporary = target + ".part"
         reference.write_png(temporary, result)
-        os.replace(temporary, target)
+        replace_file(temporary, target)
         done += 1
         print(f"\r{done} sprites upscaled", end="", flush=True)
     print("\r", end="")

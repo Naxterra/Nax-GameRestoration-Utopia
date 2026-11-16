@@ -44,7 +44,20 @@ python -I tools\ai\upscale_sprites.py utopia
 
 The tool works best with a large ESRGAN model. Download `RealESRGAN_x4plus.pth` from the releases of the Real-ESRGAN project on GitHub (BSD 3-Clause License) and put it in `%LOCALAPPDATA%\Nax Game Restoration\models`, where the tool looks for it first. It takes about a second per sprite on the processor. Without it the tool uses the small network that comes with this repository, which gives softer pictures. Any other 4x ESRGAN checkpoint, for example the pixel art model `4x-PixelPerfectV4` from OpenModelDB, can be given with `--model <file>`. The checkpoints are read without PyTorch by a loader that refuses anything but weights.
 
-A running game picks the new pictures up within a few seconds. With the AI filter, every screen pixel that belongs to a sprite is then drawn from that sprite's upscaled picture. The upscaled pictures are ordinary PNG files, so they can also be improved by hand or with another tool, as long as each keeps exactly four times the size of its original. The tool skips sprites that already have a picture unless `--again` is given, so edited pictures are kept. The pictures are made from your copy of the game and stay on your machine.
+### Redrawing sprites with a diffusion model
+
+With an NVIDIA graphics card, `tools\ai\generate_sprites.py` goes further: it enlarges each sprite with RealESRGAN_x4plus on the graphics card, lets Stable Diffusion XL with the ControlNet Tile model redraw it with new fine detail while keeping its layout, and then puts the broad colours and shading of the clean picture back, so the sprite keeps the game's look and fits its neighbours. The result is eight times the original size. `--strength` (0.35 by default) sets how much the diffusion model may change, and `--prompt` describes the look. The tool needs its own Python environment with PyTorch, which is kept apart from the system's Python:
+
+```powershell
+py -3.15 -m venv "$env:LOCALAPPDATA\Nax Game Restoration\ai-env"
+& "$env:LOCALAPPDATA\Nax Game Restoration\ai-env\Scripts\python.exe" -m pip install torch --index-url https://download.pytorch.org/whl/cu132
+& "$env:LOCALAPPDATA\Nax Game Restoration\ai-env\Scripts\python.exe" -m pip install diffusers transformers accelerate safetensors huggingface_hub
+& "$env:LOCALAPPDATA\Nax Game Restoration\ai-env\Scripts\python.exe" -I tools\ai\generate_sprites.py utopia
+```
+
+On first use it downloads Stable Diffusion XL Base 1.0 (CreativeML Open RAIL++-M License), xinsir/controlnet-tile-sdxl-1.0 (Apache License 2.0) and madebyollin/sdxl-vae-fp16-fix (MIT License) from Hugging Face, about 10 GB, into `%LOCALAPPDATA%\Nax Game Restoration\hf-cache`. RealESRGAN_x4plus.pth must be in the models folder described above.
+
+A running game picks the new pictures up within a few seconds. With the AI filter, every screen pixel that belongs to a sprite is then drawn from that sprite's upscaled picture. The upscaled pictures are ordinary PNG files, so they can also be improved by hand or with another tool, as long as each keeps exactly four or eight times the size of its original. The tool skips sprites that already have a picture unless `--again` is given, so edited pictures are kept. The pictures are made from your copy of the game and stay on your machine.
 
 ## Music and options
 

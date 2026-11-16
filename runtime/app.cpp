@@ -1,7 +1,7 @@
 // The Windows program: window, input, presentation and the thread the translated game runs on.
 //
 // Options: --data <folder> (the game files), --sound adlib|beeper|roland, --language en|fr|de|it, --skip-intro, --mute,
-// --filter sharp|smooth|crt,
+// --filter sharp|smooth|crt|ai,
 // and for automated checks --script <file>, --shot-every <ms> and --quit-after <ms>.
 #include <windows.h>
 #include <shellapi.h>
@@ -43,6 +43,7 @@ int g_filter = 0;
 bool g_shot_requested = false;
 std::filesystem::path g_settings;
 std::filesystem::path g_error_file;
+std::string g_ai_problem;  // why the AI filter is not available, written to the log once the machine exists
 
 // Shows an error to the player. During a scripted check nobody watches the screen, so the message goes to
 // last-error.txt in the save folder instead of a dialog that would wait for a click.
@@ -58,8 +59,8 @@ void report_error(const std::wstring& text, const wchar_t* caption) {
 }
 
 std::wstring widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
-const wchar_t* const kFilterNames[nax::Presenter::kFilterCount] = {L"sharp", L"smooth", L"crt"};
-const wchar_t* const kFilterTitles[nax::Presenter::kFilterCount] = {L"sharp pixels", L"smooth edges", L"CRT"};
+const wchar_t* const kFilterNames[nax::Presenter::kFilterCount] = {L"sharp", L"smooth", L"crt", L"ai"};
+const wchar_t* const kFilterTitles[nax::Presenter::kFilterCount] = {L"sharp pixels", L"smooth edges", L"CRT", L"AI upscaling"};
 bool g_abs_baseline = false;
 bool g_raw_absolute = false;
 double g_last_abs_x = 0, g_last_abs_y = 0;
@@ -117,6 +118,9 @@ void show_filter(HWND hwnd) {
 // Switches to the next filter and remembers the choice for the next start.
 void next_filter(HWND hwnd) {
     g_filter = (g_filter + 1) % nax::Presenter::kFilterCount;
+    // The AI filter is offered only when its model has loaded.
+    if (g_filter == nax::Presenter::kAiFilter && !(g_presenter && g_presenter->ai_ready()))
+        g_filter = (g_filter + 1) % nax::Presenter::kFilterCount;
     show_filter(hwnd);
     if (FILE* f = _wfopen(g_settings.c_str(), L"w")) {
         std::fwprintf(f, L"filter=%ls\n", kFilterNames[g_filter]);
@@ -469,6 +473,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return 1;
     }
     g_presenter = &presenter;
+    {
+        // The AI model lies next to the program, or in the models folder of the source tree during development.
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        const std::filesystem::path dir = std::filesystem::path(exe).parent_path();
+        const wchar_t* model = L"realesr-animevideov3.bin";
+        std::string ai_error = "The AI model file was not found.";
+        bool loaded = false;
+        for (const auto& candidate : {dir / L"models" / model, dir.parent_path().parent_path() / L"models" / model}) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec)) {
+                loaded = presenter.enable_ai(candidate, &ai_error);
+                break;
+            }
+        }
+        if (!loaded) {
+            g_ai_problem = ai_error;
+            if (g_filter == nax::Presenter::kAiFilter) g_filter = 0;
+        }
+    }
     show_filter(g_hwnd);
     RAWINPUTDEVICE mouse_device{0x01, 0x02, 0, g_hwnd};
     RegisterRawInputDevices(&mouse_device, 1, sizeof(mouse_device));
@@ -476,6 +500,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     nax::Machine machine;
     machine.set_folders(data, saves);
+    if (!g_ai_problem.empty()) machine.log("AI filter not available: %s", g_ai_problem.c_str());
     nax::Audio audio;
     std::string audio_error;
     // The chip's timers answer even without a sound device, so the game's AdLib detection still succeeds.
@@ -526,6 +551,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             shot = g_shots / name;
         }
         presenter.draw(frame.data(), g_filter, shot.empty() ? nullptr : &shot);
+        if (!shot.empty() && g_filter == nax::Presenter::kAiFilter) machine.log("AI filter: %.1f ms of GPU time per picture", presenter.ai_gpu_ms());
     }
     machine.request_stop();
     game_thread.join();

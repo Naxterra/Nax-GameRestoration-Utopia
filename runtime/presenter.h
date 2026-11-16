@@ -10,6 +10,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
+
+#include "ai_upscaler.h"
 
 namespace nax {
 
@@ -21,7 +24,12 @@ public:
     ~Presenter();
     bool init(HWND hwnd, std::string* error);
     void resize();
-    static constexpr int kFilterCount = 3;  // sharp pixels, smooth edges, CRT
+    static constexpr int kFilterCount = 4;  // sharp pixels, smooth edges, CRT, AI upscaling
+    static constexpr int kAiFilter = 3;
+    // Loads the AI model for the fourth filter. Without it, that filter is not offered.
+    bool enable_ai(const std::filesystem::path& weights, std::string* error);
+    bool ai_ready() const { return ai_.ready(); }
+    double ai_gpu_ms() { return ai_.last_gpu_ms(); }
     // Draws one frame with the given filter; with a capture path it also saves the frame as a PNG file.
     void draw(const uint32_t* rgba, int filter, const std::filesystem::path* capture = nullptr);
     // The rectangle inside the client area that shows the game picture, for mapping mouse positions.
@@ -54,6 +62,8 @@ private:
     bool texture_readable_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> readback_;
     UINT64 readback_size_ = 0;
+    AiUpscaler ai_;
+    std::vector<uint32_t> ai_input_;  // the picture the AI result belongs to
     UINT width_ = 0, height_ = 0;
 };
 

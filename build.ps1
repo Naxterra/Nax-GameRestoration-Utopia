@@ -52,7 +52,7 @@ if ($Tests) {
     $testBuild = Join-Path $root "build\tests"
     $testObjects = Join-Path $testBuild "obj"
     New-Item -ItemType Directory -Force $testObjects | Out-Null
-    $testSources = @(Get-ChildItem (Join-Path $root "runtime") -Filter *.cpp | Where-Object { $_.Name -notin @("app.cpp", "presenter.cpp") } | ForEach-Object { $_.FullName })
+    $testSources = @(Get-ChildItem (Join-Path $root "runtime") -Filter *.cpp | Where-Object { $_.Name -notin @("app.cpp", "presenter.cpp", "ai_upscaler.cpp") } | ForEach-Object { $_.FullName })
     $testSources += Join-Path $root "tests\cpp\test_runtime.cpp"
     $testExe = Join-Path $testBuild "test_runtime.exe"
     $testFlags = @("/nologo", "/std:c++20", "/EHsc", "/MT", "/W3", "/utf-8", "/DNOMINMAX", "/D_CRT_SECURE_NO_WARNINGS", "/DWIN32_LEAN_AND_MEAN",
@@ -99,4 +99,7 @@ $flags = @("/nologo", "/std:c++20", "/EHsc", "/MT", "/W3", "/wd4102", "/MP", "/b
     "/DNOMINMAX", "/D_CRT_SECURE_NO_WARNINGS", "/DWIN32_LEAN_AND_MEAN", "/DUNICODE", "/D_UNICODE", "/I$root", "/Fo$($objects -replace '\\', '/')/", "/Fe$(Join-Path $build $spec.exe)") + $optimize
 & cl.exe @flags @sources /link /SUBSYSTEM:WINDOWS d3d12.lib dxgi.lib d3dcompiler.lib user32.lib shell32.lib ole32.lib xaudio2.lib
 if ($LASTEXITCODE -ne 0) { throw "Compiling failed." }
+# The AI filter's model goes next to the program.
+New-Item -ItemType Directory -Force (Join-Path $build "models") | Out-Null
+Copy-Item (Join-Path $root "models\*") (Join-Path $build "models") -Force
 Write-Host "Built $(Join-Path $build $spec.exe)"

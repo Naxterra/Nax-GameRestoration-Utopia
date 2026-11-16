@@ -21,9 +21,11 @@ namespace {
 //      in which stair steps along diagonal and round edges become smooth lines while flat areas stay unchanged.
 //   2  CRT: the picture as a colour monitor of the time showed it, with visible scanlines, a slight glow
 //      between them and an aperture grille, computed in linear light.
+//   3  AI upscaling: the picture redrawn at four times the size by a neural network (see ai_upscaler.cpp).
 const char kShader[] = R"(
 cbuffer Params : register(b0) { float2 scale; uint mode; uint unused; };
 Texture2D picture : register(t0);
+Texture2D upscaled : register(t1);
 SamplerState smooth : register(s0);
 static const float2 size = float2(320, 200);
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -35,15 +37,16 @@ V vs(uint id : SV_VertexID) {
     return o;
 }
 
-float3 sharp(float2 uv) {
-    float2 texel = uv * size;
-    float2 whole = max(floor(scale), 1);
+float3 sharp_of(Texture2D t, float2 tsize, float2 tscale, float2 uv) {
+    float2 texel = uv * tsize;
+    float2 whole = max(floor(tscale), 1);
     float2 base = floor(texel);
     float2 dist = frac(texel) - 0.5;
     float2 range = 0.5 - 0.5 / whole;
     float2 f = (dist - clamp(dist, -range, range)) * whole + 0.5;
-    return picture.SampleLevel(smooth, (base + f) / size, 0).rgb;
+    return t.SampleLevel(smooth, (base + f) / tsize, 0).rgb;
 }
+float3 sharp(float2 uv) { return sharp_of(picture, size, scale, uv); }
 
 float3 texel(int2 p) { return picture.Load(int3(clamp(p, int2(0, 0), int2(319, 199)), 0)).rgb; }
 bool same(float3 a, float3 b) { return all(abs(a - b) < 0.002); }
@@ -96,6 +99,7 @@ float3 crt(float2 uv, float2 pos) {
 float4 ps(V i) : SV_Target {
     if (mode == 1) return float4(smooth_edges(i.uv), 1);
     if (mode == 2) return float4(crt(i.uv, i.pos.xy), 1);
+    if (mode == 3) return float4(sharp_of(upscaled, size * 4, scale / 4, i.uv), 1);
     return float4(sharp(i.uv), 1);
 }
 )";
@@ -107,6 +111,9 @@ bool check(HRESULT hr, const char* what, std::string* error) {
     *error = text;
     return false;
 }
+
+constexpr D3D12_RESOURCE_STATES kPictureReadable =
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
 D3D12_RESOURCE_BARRIER transition(ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
     D3D12_RESOURCE_BARRIER b{};
@@ -156,7 +163,7 @@ bool Presenter::init(HWND hwnd, std::string* error) {
     rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_DESCRIPTOR_HEAP_DESC sh{};
     sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    sh.NumDescriptors = 1;
+    sh.NumDescriptors = 2;  // the game picture, then the AI picture
     sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!check(device_->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&srv_heap_)), "Creating the texture heap", error)) return false;
 
@@ -172,7 +179,7 @@ bool Presenter::init(HWND hwnd, std::string* error) {
 
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 1;
+    range.NumDescriptors = 2;
     D3D12_ROOT_PARAMETER params[2]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.Num32BitValues = 4;
@@ -236,6 +243,17 @@ bool Presenter::init(HWND hwnd, std::string* error) {
                "Creating the picture texture", error))
         return false;
     device_->CreateShaderResourceView(texture_.Get(), nullptr, srv_heap_->GetCPUDescriptorHandleForHeapStart());
+    {
+        // Until the AI model is loaded, the second slot holds an empty view, which reads as black.
+        D3D12_SHADER_RESOURCE_VIEW_DESC empty{};
+        empty.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        empty.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        empty.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        empty.Texture2D.MipLevels = 1;
+        auto slot = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+        slot.ptr += device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        device_->CreateShaderResourceView(nullptr, &empty, slot);
+    }
 
     D3D12_HEAP_PROPERTIES upload_heap{};
     upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -256,6 +274,16 @@ bool Presenter::init(HWND hwnd, std::string* error) {
         upload_[i]->Map(0, &none, reinterpret_cast<void**>(&upload_ptr_[i]));
     }
     create_targets();
+    return true;
+}
+
+bool Presenter::enable_ai(const std::filesystem::path& weights, std::string* error) {
+    UINT64 frequency = 0;
+    queue_->GetTimestampFrequency(&frequency);
+    if (!device_ || !ai_.init(device_.Get(), frequency, weights, error)) return false;
+    auto slot = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+    slot.ptr += device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    device_->CreateShaderResourceView(ai_.result(), nullptr, slot);
     return true;
 }
 
@@ -319,7 +347,7 @@ void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::pa
     list_->Reset(allocators_[i].Get(), pso_.Get());
 
     if (texture_readable_) {
-        const auto b = transition(texture_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        const auto b = transition(texture_.Get(), kPictureReadable, D3D12_RESOURCE_STATE_COPY_DEST);
         list_->ResourceBarrier(1, &b);
     }
     D3D12_TEXTURE_COPY_LOCATION dst{};
@@ -331,11 +359,22 @@ void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::pa
     src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, kWidth, kHeight, 1, kWidth * 4};
     list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     D3D12_RESOURCE_BARRIER barriers[2] = {
-        transition(texture_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        transition(texture_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, kPictureReadable),
         transition(targets_[i].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET),
     };
     list_->ResourceBarrier(2, barriers);
     texture_readable_ = true;
+
+    // The network runs only when the picture has changed since its last run.
+    const bool use_ai = filter == kAiFilter && ai_.ready();
+    if (use_ai) {
+        const size_t pixels = size_t(kWidth) * kHeight;
+        if (ai_input_.size() != pixels || std::memcmp(ai_input_.data(), rgba, pixels * 4) != 0) {
+            ai_.record(list_.Get(), texture_.Get());
+            ai_input_.assign(rgba, rgba + pixels);
+        }
+    }
+    list_->SetPipelineState(pso_.Get());
 
     auto rtv = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += SIZE_T(i) * rtv_size_;
@@ -383,6 +422,7 @@ void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::pa
         }
         if (!readback_) capture = nullptr;
     }
+    if (capture && use_ai) ai_.record_readback(list_.Get());
     if (capture) {
         const auto to_copy = transition(targets_[i].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         list_->ResourceBarrier(1, &to_copy);
@@ -426,6 +466,13 @@ void Presenter::draw(const uint32_t* rgba, int filter, const std::filesystem::pa
             D3D12_RANGE none{0, 0};
             readback_->Unmap(0, &none);
             write_png(*capture, pixels.data(), unsigned(w), unsigned(h), 1);
+        }
+        if (use_ai) {
+            // With the AI filter a screenshot also keeps the network's input and its full-size result, so the
+            // GPU output can be checked against tools/ai/reference_upscale.py.
+            auto stem = capture->parent_path() / capture->stem();
+            write_png(std::filesystem::path(stem.wstring() + L"-in.png"), ai_input_.data(), kWidth, kHeight, 1);
+            ai_.save_readback(std::filesystem::path(stem.wstring() + L"-ai.png"));
         }
     }
 }

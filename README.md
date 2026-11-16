@@ -32,7 +32,7 @@ The script translates the original program files into `generated\utopia` and com
 
 ## Playing
 
-Start `build\utopia\Utopia.exe`. While the window is active, the mouse controls the game and the Windows pointer stays inside the window; Alt+Tab releases it. Alt+Enter switches between a window and borderless fullscreen. F11 switches between three picture filters: sharp pixels, smooth edges (stair steps along diagonal and round edges are redrawn as smooth lines) and a CRT look with scanlines; the choice is remembered for the next start. F12 saves a screenshot exactly as the picture appears on screen.
+Start `build\utopia\Utopia.exe`. While the window is active, the mouse controls the game and the Windows pointer stays inside the window; Alt+Tab releases it. Alt+Enter switches between a window and borderless fullscreen. F11 switches between four picture filters: sharp pixels, smooth edges (stair steps along diagonal and round edges are redrawn as smooth lines), a CRT look with scanlines, and AI upscaling; the choice is remembered for the next start. The AI filter redraws the picture at four times the size with the realesr-animevideov3 network from the Real-ESRGAN project, which runs as Direct3D 12 compute shaders on the graphics card and only works when the picture changes. Edges and shapes become smooth and painted, while dithered textures turn into finer patterns. F12 saves a screenshot exactly as the picture appears on screen.
 
 Utopia does not play music on its own. On the options screen, click the disk button with the note, choose one of the four tunes, and use the note button to switch the music on and off.
 
@@ -44,7 +44,7 @@ Utopia does not play music on its own. On the options screen, click the disk but
 | `--mute` | No sound output. |
 | `--language en`, `fr`, `de` or `it` | The language of the game's texts. |
 | `--skip-intro` | Starts the game without the intro. |
-| `--filter sharp`, `smooth` or `crt` | The picture filter for this start, instead of the one last chosen with F11. |
+| `--filter sharp`, `smooth`, `crt` or `ai` | The picture filter for this start, instead of the one last chosen with F11. |
 | `--data <folder>` | Uses the game files in another folder. |
 
 ## Where files go
@@ -56,11 +56,17 @@ The original game files are never changed. Save games and every other file the g
 | Folder | Content |
 |---|---|
 | `tools/recomp` | The translator: the MZ and EXEPACK loader, code discovery and the C++ generator, written in Python. |
+| `tools/ai` | The converter that turns a Real-ESRGAN checkpoint into the AI filter's weight file without PyTorch, and a CPU reference of the network for checking the GPU version. |
+| `models` | The AI filter's weights and their license. The build copies them next to the program. |
 | `runtime` | The native runtime: CPU helpers, DOS, BIOS, mouse and VGA services, the OPL2 synthesiser, sound output and the Direct3D 12 window. |
 | `games/<game>` | What each game needs: the replacement for its launcher and the seed lists of entry points that discovery cannot prove. |
 | `tests` | Python tests for the translator and C++ tests for the runtime. |
 | `gamedata/<game>` | Your copy of the game. Git ignores this folder. |
 | `generated`, `build` | The translated code and the built program, both derived from your copy. Git ignores these folders. |
+
+## Third-party components
+
+The AI filter's weights come from the Real-ESRGAN project and are under the BSD 3-Clause License. See [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
 
 ## License
 

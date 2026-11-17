@@ -57,6 +57,8 @@ py -3.15 -m venv "$env:LOCALAPPDATA\Nax Game Restoration\ai-env"
 
 The ground tiles are treated differently, because tiles redrawn one by one would not fit together. `tools\ai\generate_texture.py` lets Stable Diffusion XL paint a seamless ground texture (by default dry Martian soil with small rocks and cracks), for example `generate_texture.py "%LOCALAPPDATA%\Nax Game Restoration\utopia\hd\ground.png"`. `generate_sprites.py` then recognises flat ground tiles, maps every pixel of such a tile back onto the ground it shows, and adds the texture's fine detail there on top of the tile's own colours and rocks. Neighbouring tiles show neighbouring pieces of the same texture, so the terrain continues without seams. Other planets can get their own texture through `--prompt`.
 
+Once this environment exists, nothing has to be started by hand: whenever the game has saved new sprites, it runs `generate_sprites.py` in the background on the graphics card, at low priority, and the new pictures appear in the game a few seconds later. When the ground texture does not exist yet, the tool paints it first. The tool's output goes to `hd\redraw.log`. `--no-redraw` switches this off for one start.
+
 On first use it downloads Stable Diffusion XL Base 1.0 (CreativeML Open RAIL++-M License), xinsir/controlnet-tile-sdxl-1.0 (Apache License 2.0) and madebyollin/sdxl-vae-fp16-fix (MIT License) from Hugging Face, about 10 GB, into `%LOCALAPPDATA%\Nax Game Restoration\hf-cache`. RealESRGAN_x4plus.pth must be in the models folder described above.
 
 A running game picks the new pictures up within a few seconds. With the AI filter, every screen pixel that belongs to a sprite is then drawn from that sprite's upscaled picture. The upscaled pictures are ordinary PNG files, so they can also be improved by hand or with another tool, as long as each keeps exactly four or eight times the size of its original. The tool skips sprites that already have a picture unless `--again` is given, so edited pictures are kept. The pictures are made from your copy of the game and stay on your machine.
@@ -75,6 +77,7 @@ Utopia does not play music on its own. On the options screen, click the disk but
 | `--skip-intro` | Starts the game without the intro. |
 | `--filter sharp`, `smooth`, `crt` or `ai` | The picture filter for this start, instead of the one last chosen with F11. |
 | `--data <folder>` | Uses the game files in another folder. |
+| `--no-redraw` | Does not redraw new sprites in the background. |
 
 ## Where files go
 

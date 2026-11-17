@@ -69,6 +69,7 @@ public:
     void failed(uint32_t slot);
 
     size_t sprite_count();
+    size_t missing_count();  // saved sprites without an upscaled picture yet
 
 private:
     struct Mark {

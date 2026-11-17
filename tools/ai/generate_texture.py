@@ -21,16 +21,7 @@ PROMPT = ("seamless tileable texture, martian ground seen from above, red-brown 
 NEGATIVE = "shadows from one side, perspective, horizon, sky, text, watermark, blurry, large objects"
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("output")
-    parser.add_argument("--prompt", default=PROMPT)
-    parser.add_argument("--seed", type=int, default=1992)
-    parser.add_argument("--size", type=int, default=1024)
-    parser.add_argument("--steps", type=int, default=40)
-    args = parser.parse_args()
-    if not torch.cuda.is_available():
-        sys.exit("PyTorch cannot reach the graphics card.")
+def make_texture(output, prompt=PROMPT, seed=1, size=1024, steps=40):
     from diffusers import AutoencoderKL, StableDiffusionXLPipeline
 
     vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
@@ -41,12 +32,27 @@ def main():
         for module in model.modules():
             if isinstance(module, torch.nn.Conv2d):
                 module.padding_mode = "circular"
-    generator = torch.Generator("cuda").manual_seed(args.seed)
-    image = pipe(prompt=args.prompt, negative_prompt=NEGATIVE, width=args.size, height=args.size,
-                 num_inference_steps=args.steps, guidance_scale=6.0, generator=generator).images[0]
-    temporary = args.output + ".part"
+    generator = torch.Generator("cuda").manual_seed(seed)
+    image = pipe(prompt=prompt, negative_prompt=NEGATIVE, width=size, height=size,
+                 num_inference_steps=steps, guidance_scale=6.0, generator=generator).images[0]
+    temporary = output + ".part"
     image.save(temporary, format="PNG")
-    os.replace(temporary, args.output)
+    os.replace(temporary, output)
+    del pipe
+    torch.cuda.empty_cache()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("output")
+    parser.add_argument("--prompt", default=PROMPT)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--size", type=int, default=1024)
+    parser.add_argument("--steps", type=int, default=40)
+    args = parser.parse_args()
+    if not torch.cuda.is_available():
+        sys.exit("PyTorch cannot reach the graphics card.")
+    make_texture(args.output, args.prompt, args.seed, args.size, args.steps)
     print(f"Wrote {args.output}")
 
 

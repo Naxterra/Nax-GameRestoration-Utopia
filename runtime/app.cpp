@@ -110,6 +110,77 @@ void build_frame(nax::Machine& m, nax::HdSprites& hd, std::vector<uint32_t>& out
     }
 }
 
+// Runs tools/ai/generate_sprites.py in the background whenever the game has saved sprites that have no
+// upscaled picture yet, provided the PyTorch environment described in the README exists. The tool writes each
+// picture under a temporary name and moves it into place, and the game picks the pictures up by itself.
+class SpriteRedrawer {
+public:
+    void init(const std::filesystem::path& exe_dir, const std::filesystem::path& hd_folder, nax::Machine& m) {
+        wchar_t local[MAX_PATH];
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return;
+        python_ = std::filesystem::path(local) / L"Nax Game Restoration" / L"ai-env" / L"Scripts" / L"python.exe";
+        std::error_code ec;
+        for (const auto& root : {exe_dir, exe_dir.parent_path().parent_path()})
+            if (std::filesystem::exists(root / L"tools" / L"ai" / L"generate_sprites.py", ec)) root_ = root;
+        enabled_ = !root_.empty() && std::filesystem::exists(python_, ec);
+        log_ = hd_folder / L"redraw.log";
+        machine_ = &m;
+        if (enabled_) m.log("New sprites are redrawn in the background with %ls", python_.c_str());
+    }
+    void tick(nax::HdSprites& hd) {
+        if (!enabled_) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_check_) return;
+        next_check_ = now + std::chrono::seconds(3);
+        if (process_) {
+            if (WaitForSingleObject(process_, 0) != WAIT_OBJECT_0) return;
+            CloseHandle(process_);
+            process_ = nullptr;
+        }
+        // A new run starts when sprites without a picture are waiting and the game saved new ones since the
+        // last run, so a sprite the tool cannot redraw does not start it again and again.
+        const size_t count = hd.sprite_count();
+        if (hd.missing_count() == 0 || count == count_at_last_run_) return;
+        count_at_last_run_ = count;
+        std::wstring command = L"\"" + python_.wstring() + L"\" -I \"" + (root_ / L"tools" / L"ai" / L"generate_sprites.py").wstring() +
+                               L"\" " + game::data_folder_name();
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        HANDLE out = CreateFileW(log_.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = si.hStdError = out;
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr,
+                           root_.c_str(), &si, &pi)) {
+            CloseHandle(pi.hThread);
+            process_ = pi.hProcess;
+            machine_->log("Redrawing new sprites in the background");
+        } else {
+            machine_->log("Could not start the sprite redrawer (error %lu)", GetLastError());
+            enabled_ = false;
+        }
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    }
+    // Ends a run that is still going when the game closes. Finished pictures are already in place, and the
+    // tool only ever replaces a picture with a complete one.
+    void stop() {
+        if (!process_) return;
+        TerminateProcess(process_, 1);
+        WaitForSingleObject(process_, 5000);
+        CloseHandle(process_);
+        process_ = nullptr;
+    }
+
+private:
+    bool enabled_ = false;
+    std::filesystem::path python_, root_, log_;
+    nax::Machine* machine_ = nullptr;
+    HANDLE process_ = nullptr;
+    size_t count_at_last_run_ = 0;
+    std::chrono::steady_clock::time_point next_check_{};
+};
+
 // The next frame is saved as it appears on screen, with the current filter.
 void save_shot() { g_shot_requested = true; }
 
@@ -517,6 +588,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     hd.set_folder(saves / L"hd");
     machine.hd = &hd;
     presenter.set_hd(&hd);
+    SpriteRedrawer redrawer;
+    if (!options.count(L"no-redraw")) {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        redrawer.init(std::filesystem::path(exe).parent_path(), saves / L"hd", machine);
+    }
     if (options.count(L"record-audio")) {
         if (options.count(L"mute")) machine.log("--record-audio is ignored because --mute turns sound output off");
         else audio.record(options.at(L"record-audio"));
@@ -553,6 +630,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         if (quit_after > 0 && now - start > std::chrono::milliseconds(quit_after)) machine.request_stop();
         flush_pending_motion();
         build_frame(machine, hd, frame, refs);
+        redrawer.tick(hd);
         std::filesystem::path shot;
         if (g_shot_requested) {
             g_shot_requested = false;
@@ -566,6 +644,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         if (!shot.empty() && g_filter == nax::Presenter::kAiFilter) machine.log("AI filter: %.1f ms of GPU time per picture", presenter.ai_gpu_ms());
     }
     machine.request_stop();
+    redrawer.stop();
     game_thread.join();
     machine.audio = nullptr;
     machine.hd = nullptr;

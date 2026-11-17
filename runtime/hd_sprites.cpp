@@ -234,4 +234,11 @@ size_t HdSprites::sprite_count() {
     return slots_.size();
 }
 
+size_t HdSprites::missing_count() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t n = 0;
+    for (const auto& s : slots_) n += s.state == State::missing ? 1 : 0;
+    return n;
+}
+
 }  // namespace nax

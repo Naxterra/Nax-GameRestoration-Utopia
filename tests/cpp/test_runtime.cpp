@@ -391,6 +391,17 @@ const std::vector<Test> kTests = {
          const bool soon = clearing.overflow(5000, 100);  // another screen that needs much less
          return first && !soon && clearing.overflow(11000, 100);
      }},
+    {"second_crowded_screen_within_the_same_minute_is_held_back_too", [] {
+         nax::AtlasClearing clearing(1000);
+         const bool a = clearing.overflow(0, 400) && !clearing.overflow(5000, 400);       // screen A did not help
+         const bool b = clearing.overflow(20000, 200) && !clearing.overflow(25000, 200);  // screen B did not help
+         return a && b && !clearing.overflow(36000, 200) && !clearing.overflow(36000, 400);
+     }},
+    {"clearly_larger_screen_is_not_held_back_by_a_smaller_one", [] {
+         nax::AtlasClearing clearing(1000);
+         const bool held = clearing.overflow(0, 200) && !clearing.overflow(5000, 200);
+         return held && !clearing.overflow(20000, 200) && clearing.overflow(20000, 450);
+     }},
     {"room_needed_on_screen_counts_each_shown_sprite_once_with_its_gap", [] {
          nax::Machine m;
          nax::HdSprites hd;

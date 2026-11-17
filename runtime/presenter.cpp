@@ -481,6 +481,9 @@ void Presenter::upload_hd(UINT frame) {
     // A large batch is spread over several frames: each frame loads pictures until about 16 MB have been
     // uploaded. The rest stays pending and comes in the next frames.
     size_t budget = size_t(16) << 20;
+    // Reading pictures costs time too, also for pictures that turn out unusable, so at most about 64 MB of
+    // decoded pictures are read per frame.
+    size_t decode_budget = size_t(64) << 20;
     for (const auto& p : pending) {
         // Sprites are packed in rows ("shelves") with a gap of one original pixel between them. The place is
         // found before the picture is read, so a full atlas costs no decoding.
@@ -513,9 +516,12 @@ void Presenter::upload_hd(UINT frame) {
         }
         const size_t bytes = size_t(p.width) * k * size_t(p.rows) * k * 4;
         if (bytes > budget && budget != (size_t(16) << 20)) break;
+        if (decode_budget == 0) break;
         UINT w = 0, h = 0;
         std::vector<uint8_t> rgba;
-        if (!load_picture(p.file, &w, &h, &rgba)) {
+        const bool loaded = load_picture(p.file, &w, &h, &rgba);
+        decode_budget -= std::min(decode_budget, std::max(rgba.size(), bytes / 4));
+        if (!loaded) {
             hd_->failed(p.slot);
             continue;
         }

@@ -30,9 +30,9 @@ class Machine;
 // make every upscaled picture flicker back to its original pixels while the same set is loaded again. So the
 // atlas is only emptied when the pictures on screen need at most half of it, and at most once every 10
 // seconds. If it runs full again within those 10 seconds while the screen needs about as much as it did at
-// the emptying, the emptying did not help, and screens that need that much are not emptied for again during
-// the next minute. A screen that needs much less or much more counts as a different screen and is not held
-// back by this.
+// the emptying (between three quarters and five quarters of it), the emptying did not help, and for the next
+// minute the atlas is not emptied for a screen that needs about that much. A screen that needs clearly less
+// or clearly more counts as a different screen and is not held back by this.
 class AtlasClearing {
 public:
     explicit AtlasClearing(uint64_t capacity) : capacity_(capacity) {}
@@ -41,10 +41,14 @@ public:
     bool overflow(int64_t now_ms, uint64_t on_screen);
 
 private:
+    struct Held {
+        uint64_t need;  // what the screen needed when emptying did not help
+        int64_t until;  // when it may be emptied for again
+    };
     uint64_t capacity_;
-    int64_t cleared_at_ = INT64_MIN / 2, limit_set_at_ = INT64_MIN / 2;
-    uint64_t cleared_for_ = 0;      // what the screen needed when the atlas was last emptied
-    uint64_t limit_ = UINT64_MAX;  // screens needing this much or more are not emptied for
+    int64_t cleared_at_ = INT64_MIN / 2;
+    uint64_t cleared_for_ = 0;  // what the screen needed when the atlas was last emptied
+    std::vector<Held> held_;
 };
 
 class HdSprites {

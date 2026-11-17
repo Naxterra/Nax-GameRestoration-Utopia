@@ -265,19 +265,20 @@ uint64_t HdSprites::on_screen_cells() {
 }
 
 bool AtlasClearing::overflow(int64_t now_ms, uint64_t on_screen) {
-    // The limit runs out a minute after it was set. Overflows in between, which come every frame while a
+    // About as much: between three quarters and five quarters.
+    auto about = [](uint64_t need, uint64_t than) { return need * 4 >= than * 3 && need * 4 <= than * 5; };
+    // Each hold runs out a minute after it was set. Overflows in between, which come every frame while a
     // picture waits for room, do not extend it.
-    if (limit_ != UINT64_MAX && now_ms - limit_set_at_ > 60000) limit_ = UINT64_MAX;
+    std::erase_if(held_, [now_ms](const Held& h) { return now_ms >= h.until; });
     if (now_ms - cleared_at_ < 10000) {
         // Full again soon after emptying. If the screen still needs about as much as then, emptying did not help.
-        const bool same_screen = on_screen * 4 >= cleared_for_ * 3 && on_screen * 4 <= cleared_for_ * 5;
-        if (same_screen && limit_ == UINT64_MAX) {
-            limit_ = cleared_for_ * 3 / 4;
-            limit_set_at_ = now_ms;
-        }
+        if (about(on_screen, cleared_for_) &&
+            std::none_of(held_.begin(), held_.end(), [&](const Held& h) { return h.need == cleared_for_; }))
+            held_.push_back({cleared_for_, now_ms + 60000});
         return false;
     }
-    if (on_screen > capacity_ / 2 || on_screen >= limit_) return false;
+    if (on_screen > capacity_ / 2) return false;
+    if (std::any_of(held_.begin(), held_.end(), [&](const Held& h) { return about(on_screen, h.need); })) return false;
     cleared_at_ = now_ms;
     cleared_for_ = on_screen;
     return true;

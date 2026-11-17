@@ -509,8 +509,19 @@ void Presenter::upload_hd(UINT frame) {
             shelf_height_ = 0;
         }
         if (shelf_y_ + ch > kAtlasCells - 1) {
-            hd_->failed(p.slot);  // the atlas is full
-            continue;
+            // The atlas is full. It is emptied, and whatever is on screen is loaded again in the next frames,
+            // unless that happened only a moment ago: then more is needed at once than fits, and this one stays
+            // with its original pixels.
+            const auto now = std::chrono::steady_clock::now();
+            if (now - atlas_cleared_at_ < std::chrono::seconds(10)) {
+                hd_->failed(p.slot);
+                continue;
+            }
+            atlas_cleared_at_ = now;
+            shelf_x_ = shelf_y_ = 1;
+            shelf_height_ = 0;
+            hd_->atlas_cleared();
+            break;
         }
         const UINT x = shelf_x_, y = shelf_y_;
         shelf_x_ += cw;

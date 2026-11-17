@@ -124,6 +124,7 @@ public:
             if (std::filesystem::exists(root / L"tools" / L"ai" / L"generate_sprites.py", ec)) root_ = root;
         enabled_ = !root_.empty() && std::filesystem::exists(python_, ec);
         log_ = hd_folder / L"redraw.log";
+        std::filesystem::remove(log_, ec);  // the log covers this session only
         machine_ = &m;
         if (enabled_) m.log("New sprites are redrawn in the background with %ls", python_.c_str());
     }

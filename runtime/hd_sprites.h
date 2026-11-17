@@ -5,9 +5,13 @@
 // the sprite and the position inside it. When a picture with the same name exists in <folder>/upscaled, for
 // example one made by tools/ai/upscale_sprites.py, the presenter places it in a texture atlas, and each frame
 // tells it, for every screen pixel, which part of that picture to draw there instead of the original pixel.
+//
+// An upscaled picture has the colours of the moment it was saved. Whenever the palette entries a sprite uses
+// differ from those colours, for example while the game fades the screen, its original pixels are shown.
 #pragma once
 
 #include <atomic>
+#include <bitset>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -34,7 +38,8 @@ public:
     // Called on the game thread when the game draws a sprite of 4-bit pixels, two per byte with the left pixel
     // in the high half. The sprite is `width` pixels wide and `rows` high, stored from the bottom row up, and
     // is drawn upward from linear address `dest` (the bottom row's first pixel) with a line length of 320.
-    // Colour 0 is transparent, and every other colour is drawn as `base` plus the colour.
+    // Colour 0 is transparent, and every other colour is drawn as `base` plus the colour. While the colours it
+    // uses are changing (a fade), the sprite is not recorded, so no picture is saved for a passing shade.
     void draw(const Machine& m, uint32_t data, int width, int rows, uint32_t dest, uint8_t base);
 
     // Called on the game thread when the game has put a whole picture of 8-bit pixels (a background or a panel)
@@ -42,7 +47,7 @@ public:
     // is shown at `dest` with `dest_stride` bytes between rows. Sprites drawn over it take precedence where
     // they are; where the game later restores the picture, the picture's upscaled version shows again.
     // Games often unpack a picture while the screen is still dark and fade it in afterwards, so the picture is
-    // only taken over once the palette has stayed the same for half a second and is not black.
+    // only taken over once the colours it uses have stayed the same for half a second and are not all black.
     void image(const Machine& m, uint32_t data, int width, int rows, uint32_t stride, uint32_t dest, uint32_t dest_stride);
 
     // For games that draw into a 320x200 buffer and copy it to the screen as a whole: the buffer's linear
@@ -67,6 +72,8 @@ public:
     std::vector<Pending> take_pending();
     void placed(uint32_t slot, uint16_t x, uint16_t y);
     void failed(uint32_t slot);
+    // The presenter emptied its full atlas: every placed picture is loaded again when it is next needed.
+    void atlas_cleared();
 
     size_t sprite_count();
     size_t missing_count();  // saved sprites without an upscaled picture yet
@@ -83,17 +90,21 @@ private:
         uint64_t key;
         int width, rows;
         State state;
-        uint32_t atlas;  // x | y << 16 once placed
+        uint32_t atlas;           // x | y << 16 once placed
+        std::bitset<256> colours;  // the palette entries the sprite uses
+        uint64_t palette;          // their colours when the sprite was saved
+        bool current = true;       // whether those entries still have those colours (updated each frame)
     };
-
     struct Deferred {
         std::vector<uint8_t> pixels;
         int width, rows;
         uint32_t dest, dest_stride;
     };
-    uint32_t slot_for(uint64_t id, int width, int rows, const std::function<std::vector<uint32_t>()>& picture);  // mutex held
-    void take_over(const Machine& m, const Deferred& d);  // mutex held
-    bool palette_settled() const;
+
+    uint32_t slot_for(uint64_t id, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
+                      const std::function<std::vector<uint32_t>()>& picture);
+    void take_over(const Machine& m, const Deferred& d);
+    bool settled(const std::bitset<256>& colours) const;
     std::filesystem::path original_file(uint64_t key) const;
     std::filesystem::path upscaled_file(uint64_t key) const;
 
@@ -107,7 +118,7 @@ private:
     std::chrono::steady_clock::time_point next_scan_{};
     std::vector<Deferred> deferred_;
     uint8_t last_dac_[256][3]{};
-    std::atomic<int64_t> palette_changed_{0};  // steady clock in milliseconds
+    std::atomic<int64_t> colour_changed_[256]{};  // per palette entry, steady clock in milliseconds
 };
 
 }  // namespace nax

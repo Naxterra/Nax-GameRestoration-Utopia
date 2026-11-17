@@ -121,6 +121,8 @@ def main():
     parser.add_argument("game", nargs="?", default="utopia")
     parser.add_argument("--strength", type=float, default=0.0,
                         help="how much the diffusion model may change sprites other than ground tiles, 0 to 1")
+    parser.add_argument("--paint-texture", action="store_true",
+                        help="paint the ground texture with generate_texture.py first when it does not exist yet")
     parser.add_argument("--texture", help="the seamless ground texture, by default ground.png in the game's hd folder")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--control", type=float, default=0.8, help="how closely the redraw follows the clean picture's layout")
@@ -143,7 +145,7 @@ def main():
     out_dir = args.out or os.path.join(root, "upscaled")
     os.makedirs(out_dir, exist_ok=True)
     # Pictures left half-written by a run that was stopped.
-    for stale in glob.glob(os.path.join(out_dir, "*.part")):
+    for stale in glob.glob(os.path.join(out_dir, "*.part")) + glob.glob(os.path.join(root, "*.part")):
         try:
             os.remove(stale)
         except OSError:
@@ -152,10 +154,13 @@ def main():
     esrgan = GpuRrdb(os.path.join(BASE, "models", "RealESRGAN_x4plus.pth"), device)
     pipe = load_diffusion(device) if args.strength > 0 else None
     texture_path = args.texture or os.path.join(root, "ground.png")
-    if not args.texture and not os.path.exists(texture_path):
-        import generate_texture
-        print("Painting the ground texture", flush=True)
-        generate_texture.make_texture(texture_path)
+    if args.paint_texture and not os.path.exists(texture_path):
+        try:
+            import generate_texture
+            print("Painting the ground texture", flush=True)
+            generate_texture.make_texture(texture_path)
+        except Exception as error:  # noqa: BLE001 - without a texture the ground tiles are simply enlarged
+            print(f"The ground texture could not be painted: {error}", flush=True)
     ground = terrain.GroundTexture(np.asarray(Image.open(texture_path).convert("RGB"))) if os.path.exists(texture_path) else None
     done = 0
     for path in originals:

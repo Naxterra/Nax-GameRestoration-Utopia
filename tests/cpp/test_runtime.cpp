@@ -301,6 +301,30 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return waited && sprite && refs[at] == nax::HdSprites::encode(5, 10, 0);
      }},
+    {"upscaled_sprite_gives_way_to_original_pixels_while_its_colours_fade", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         draw_test_sprite(m, hd);
+         hd.placed(0, 100, 200);
+         std::vector<uint32_t> refs(64000);
+         hd.frame(m, refs.data());
+         const bool before = refs[10 * 320 + 5] != nax::HdSprites::kNone;
+         m.dac[0x41][0] ^= 0x10;  // the game changes one of the sprite's colours
+         hd.frame(m, refs.data());
+         return before && refs[10 * 320 + 5] == nax::HdSprites::kNone;
+     }},
+    {"emptied_atlas_loads_placed_pictures_again", [] {
+         Fixture f;
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         draw_test_sprite(f.m, hd);
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"original"))
+             fs::copy_file(e.path(), f.root / L"hd" / L"upscaled" / e.path().filename());
+         hd.placed(0, 1, 1);
+         const bool none_after_placing = hd.take_pending().empty();
+         hd.atlas_cleared();
+         return none_after_placing && hd.take_pending().size() == 1;
+     }},
     {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
          Fixture f;
          nax::HdSprites hd;

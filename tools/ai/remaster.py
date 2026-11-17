@@ -9,6 +9,11 @@ as detailed artwork while keeping its shape, layout and colours. The model sees 
 pixels on a plain background and returns a new picture of the same layout; the part where the sprite was is
 cut out, reduced to eight times the original size, and given the original's outline as smooth transparency.
 
+Flat tiles with painted markings that the game draws side by side, such as the four tiles of a landing pad, are
+redrawn together as one picture and cut apart again, so the pad keeps its markings running across the tiles
+instead of every tile getting edges of its own. The runtime records which sprites lie side by side in
+hd\\layout.txt.
+
 Sprites drawn while the screen was black (every visible pixel black) are skipped, because nothing can be
 redrawn from a silhouette.
 
@@ -61,6 +66,13 @@ FLAT_PROMPT = (
     "lines as clean, straight, smooth stripes and the red lamps as small round lights, not as pixel steps. No "
     "buildings, no "
     "windows, no extra lights, nothing standing up. Plain white background.")
+GROUP_PROMPT = (
+    "Remaster this low-resolution pixel-art isometric landing pad as a detailed high-resolution illustration. It "
+    "is one completely flat dark grey metal platform seen from above at an isometric angle, with painted yellow "
+    "lines and small red lamps. Keep its outline and colours, and keep every yellow line and red lamp exactly "
+    "where it is. Paint the yellow lines as clean, straight, smooth stripes and the red lamps as small round "
+    "lights, not as pixel steps. Do not add any line, frame or lamp that is not in the original. No buildings, "
+    "no windows, nothing standing up. Plain white background.")
 PICTURE_PROMPT = (
     "Remaster this low-resolution pixel-art screen of a 1990s science fiction strategy game as a detailed "
     "high-resolution picture. Keep the layout, every shape, line, icon and button exactly where it is, and keep "
@@ -160,27 +172,137 @@ def difference(colour, rgba):
     return float(np.abs(small - rgba[..., :3].astype(np.float32))[visible].mean()) if visible.any() else 0.0
 
 
+def read_layout(path):
+    """The pairs of sprites the game drew side by side, as the runtime records them in hd\\layout.txt: the two
+    sprites' names and where the second one's bottom row starts, seen from the first one's."""
+    pairs = []
+    try:
+        with open(path, encoding="ascii", errors="replace") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 4:
+                    try:
+                        pairs.append((parts[0], parts[1], int(parts[2]), int(parts[3])))
+                    except ValueError:
+                        pass  # a line cut short by a crash
+    except OSError:
+        pass
+    return pairs
+
+
+def is_tile(rgba):
+    """Whether a sprite is a whole isometric floor tile: it covers the diamond that fills its rectangle and
+    hardly anything outside it. Units, cursors and icons of a similar size have other shapes."""
+    h, w = rgba.shape[:2]
+    y = np.arange(h)[:, None] + 0.5
+    x = np.arange(w)[None, :] + 0.5
+    diamond = np.abs(x - w / 2) / (w / 2) + np.abs(y - h / 2) / (h / 2) <= 1.0
+    visible = rgba[..., 3] > 0
+    union = (diamond | visible).sum()
+    return union > 0 and (diamond & visible).sum() / union >= 0.85
+
+
+def tile_groups(sprites, pairs):
+    """Flat marked tiles that the game draws side by side, such as the four tiles of a landing pad, grouped
+    together with where each one's bottom row starts. Redrawn alone, each tile would get edges of its own, so a
+    pad would look like several small pads. `sprites` maps names to pictures. Returns one dictionary from name
+    to position per group of two or more tiles."""
+    flat = {n for n, rgba in sprites.items()
+            if not is_silhouette(rgba) and prompt_for(rgba) is FLAT_PROMPT and is_tile(rgba)}
+    links = {}
+    for a, b, dx, dy in pairs:
+        if a not in flat or b not in flat or sprites[a].shape != sprites[b].shape:
+            continue
+        h, w = sprites[a].shape[:2]
+        # Only neighbours on the isometric grid: half a tile across and half a tile's height up or down.
+        if abs(dx) == w // 2 and abs(dy) == (h + 1) // 2:
+            links.setdefault(a, []).append((b, dx, dy))
+            links.setdefault(b, []).append((a, -dx, -dy))
+    groups, placed = [], set()
+    for start in sorted(links):
+        if start in placed:
+            continue
+        group, queue = {start: (0, 0)}, [start]
+        while queue:
+            name = queue.pop()
+            x, y = group[name]
+            for other, dx, dy in links[name]:
+                # A tile is placed where it was first met. A second, different position would come from a tile
+                # used in two places; such a link is left out.
+                if other not in group:
+                    group[other] = (x + dx, y + dy)
+                    queue.append(other)
+        placed.update(group)
+        groups.append(group)
+    return groups
+
+
+def group_canvas(sprites, group):
+    """The tiles of a group enlarged with hard pixels and laid out as the game draws them, centred on a plain
+    square canvas, and where each tile lies there."""
+    tops = {n: (x, y - sprites[n].shape[0] + 1) for n, (x, y) in group.items()}
+    left = min(x for x, _ in tops.values())
+    top = min(y for _, y in tops.values())
+    right = max(x + sprites[n].shape[1] for n, (x, _) in tops.items())
+    bottom = max(y + sprites[n].shape[0] for n, (_, y) in tops.items())
+    factor = max(1, int(CANVAS * 0.75) // max(right - left, bottom - top))
+    x0 = (CANVAS - (right - left) * factor) // 2
+    y0 = (CANVAS - (bottom - top) * factor) // 2
+    canvas = Image.new("RGBA", (CANVAS, CANVAS), BACKGROUND + (255,))
+    boxes = {}
+    for n in sorted(group, key=lambda n: group[n][1]):  # the game draws from the back to the front
+        h, w = sprites[n].shape[:2]
+        big = Image.fromarray(sprites[n], "RGBA").resize((w * factor, h * factor), Image.NEAREST)
+        x, y = x0 + (tops[n][0] - left) * factor, y0 + (tops[n][1] - top) * factor
+        canvas.alpha_composite(big, (x, y))
+        boxes[n] = (x, y, x + big.width, y + big.height)
+    return canvas.convert("RGB"), boxes
+
+
+def cut(out, box, rgba):
+    """The part of the model's picture where a sprite lies, at eight times the sprite's size. The model may
+    return a slightly different size than it was given; the sprite's place scales with it."""
+    h, w = rgba.shape[:2]
+    sx, sy = out.width / CANVAS, out.height / CANVAS
+    crop = out.crop((round(box[0] * sx), round(box[1] * sy), round(box[2] * sx), round(box[3] * sy)))
+    return np.asarray(crop.resize((w * SCALE, h * SCALE), Image.LANCZOS).convert("RGB"))
+
+
+def finish(colour, rgba):
+    """A redrawn sprite with the broad colours and the outline of the original."""
+    # Outside the sprite the original has no colour, so the nearest visible colour is used there.
+    filled = upscale_sprites.fill_transparent(rgba[..., :3], rgba[..., 3] > 0)
+    colour = keep_colours(colour, np.clip(filled + 0.5, 0, 255).astype(np.uint8), SPRITE_COLOUR_RADIUS)
+    alpha = terrain.smooth_alpha(rgba[..., 3], SCALE)
+    return np.dstack([colour, alpha])
+
+
 def remaster_sprite(pipe, rgba, seed, tries=1):
     """Redraws a sprite `tries` times with different seeds and keeps the result closest to the original, since
     the model now and then moves a marking or adds something that is not there."""
-    h, w = rgba.shape[:2]
     ground = rgba.shape[0] <= 16 and terrain.is_ground(rgba)
     canvas, box = ground_canvas(rgba) if ground else sprite_canvas(rgba)
     best, best_difference = None, None
     for attempt in range(tries):
-        out = redraw(pipe, canvas, prompt_for(rgba), seed + attempt)
-        # The model may return a slightly different size; the sprite's place scales with it.
-        sx, sy = out.width / CANVAS, out.height / CANVAS
-        crop = out.crop((round(box[0] * sx), round(box[1] * sy), round(box[2] * sx), round(box[3] * sy)))
-        colour = np.asarray(crop.resize((w * SCALE, h * SCALE), Image.LANCZOS).convert("RGB"))
+        colour = cut(redraw(pipe, canvas, prompt_for(rgba), seed + attempt), box, rgba)
         d = difference(colour, rgba)
         if best is None or d < best_difference:
             best, best_difference = colour, d
-    # Outside the sprite the original has no colour, so the nearest visible colour is used there.
-    filled = upscale_sprites.fill_transparent(rgba[..., :3], rgba[..., 3] > 0)
-    colour = keep_colours(best, np.clip(filled + 0.5, 0, 255).astype(np.uint8), SPRITE_COLOUR_RADIUS)
-    alpha = terrain.smooth_alpha(rgba[..., 3], SCALE)
-    return np.dstack([colour, alpha])
+    return finish(best, rgba)
+
+
+def remaster_group(pipe, sprites, group, seed, tries=1):
+    """Redraws a group of tiles as one picture, `tries` times, keeps the version closest to the originals over
+    all its tiles, and cuts each tile out of it. Returns a dictionary from name to redrawn tile."""
+    canvas, boxes = group_canvas(sprites, group)
+    best, best_difference = None, None
+    for attempt in range(tries):
+        out = redraw(pipe, canvas, GROUP_PROMPT, seed + attempt)
+        colours = {n: cut(out, boxes[n], sprites[n]) for n in group}
+        d = sum(difference(colours[n], sprites[n]) for n in group)
+        if best is None or d < best_difference:
+            best, best_difference = colours, d
+    return {n: finish(best[n], sprites[n]) for n in group}
 
 
 def remaster_picture(pipe, rgba, seed):
@@ -213,29 +335,49 @@ def main():
     if not torch.cuda.is_available():
         sys.exit("PyTorch cannot reach the graphics card.")
     root = os.path.join(BASE, args.game, "hd")
-    originals = sorted(p for prefix in (args.only or "").split(",")
-                       for p in glob.glob(os.path.join(glob.escape(root), "original", prefix + "*.png")))
+    name_of = lambda path: os.path.splitext(os.path.basename(path))[0]  # noqa: E731
+    chosen = {name_of(p) for prefix in (args.only or "").split(",")
+              for p in glob.glob(os.path.join(glob.escape(root), "original", prefix + "*.png"))}
+    # Every saved sprite is read, because a chosen tile is redrawn together with the tiles next to it.
+    sprites = {name_of(p): np.asarray(Image.open(p).convert("RGBA"))
+               for p in glob.glob(os.path.join(glob.escape(root), "original", "*.png"))}
     out_dir = args.out or os.path.join(root, "upscaled")
     os.makedirs(out_dir, exist_ok=True)
     upscale_sprites.remove_stale_parts(glob.glob(os.path.join(glob.escape(out_dir), "*.part")))
-    work = []
-    for path in originals:
-        target = os.path.join(out_dir, os.path.basename(path))
-        rgba = np.asarray(Image.open(path).convert("RGBA"))
-        if (os.path.exists(target) and not args.again) or is_silhouette(rgba):
-            continue
-        work.append((path, target, rgba))
-    if not work:
+    target_of = lambda name: os.path.join(out_dir, name + ".png")  # noqa: E731
+
+    def wanted(name):
+        return name in chosen and not is_silhouette(sprites[name]) and (args.again or not os.path.exists(target_of(name)))
+
+    groups = tile_groups(sprites, read_layout(os.path.join(root, "layout.txt")))
+    grouped = {n for g in groups for n in g}
+    groups = [g for g in groups if any(wanted(n) for n in g)]
+    singles = [n for n in sorted(chosen) if wanted(n) and n not in grouped]
+    total = len(singles) + sum(wanted(n) for g in groups for n in g)
+    if not total:
         print("Nothing to redraw.")
         return
     pipe = load_pipeline()
-    for done, (path, target, rgba) in enumerate(work, 1):
-        whole = rgba.shape[1] >= 160 and bool((rgba[..., 3] == 255).all())
-        result = remaster_picture(pipe, rgba, args.seed) if whole else remaster_sprite(pipe, rgba, args.seed, args.tries)
-        temporary = target + ".part"
+    done = 0
+
+    def save(name, result):
+        nonlocal done
+        temporary = target_of(name) + ".part"
         Image.fromarray(result, "RGBA").save(temporary, format="PNG")
-        upscale_sprites.replace_file(temporary, target)
-        print(f"{done} of {len(work)}: {os.path.basename(path)}", flush=True)
+        upscale_sprites.replace_file(temporary, target_of(name))
+        done += 1
+        print(f"{done} of {total}: {name}.png", flush=True)
+
+    for name in singles:
+        rgba = sprites[name]
+        whole = rgba.shape[1] >= 160 and bool((rgba[..., 3] == 255).all())
+        save(name, remaster_picture(pipe, rgba, args.seed) if whole else remaster_sprite(pipe, rgba, args.seed, args.tries))
+    for group in groups:
+        # Tiles of the group that already have a picture keep it unless --again is given, as single sprites do.
+        todo = [n for n in sorted(group) if wanted(n)]
+        results = remaster_group(pipe, sprites, group, args.seed, args.tries)
+        for name in todo:
+            save(name, results[name])
 
 
 if __name__ == "__main__":

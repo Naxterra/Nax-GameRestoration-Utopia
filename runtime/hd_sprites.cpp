@@ -131,6 +131,7 @@ void HdSprites::draw(const Machine& m, uint32_t data, int width, int rows, uint3
         }
         return rgba;
     });
+    record_neighbours(id, width, rows, dest);
     // Sprites drawn later lie on top. The count runs from 1 to 4095 and starts again; 0 marks pictures.
     const uint16_t order = uint16_t(draw_count_ % 4095 + 1);
     draw_count_++;
@@ -144,6 +145,75 @@ void HdSprites::draw(const Machine& m, uint32_t data, int width, int rows, uint3
             sprite_marks_[(line + uint32_t(x)) & 0xFFFFF] = {slot + 1, uint16_t(x), uint16_t(rows - 1 - r), uint8_t(base + c), order};
         }
     }
+}
+
+void HdSprites::record_neighbours(uint64_t key, int width, int rows, uint32_t dest) {
+    std::filesystem::path file;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (folder_.empty()) return;
+        file = folder_ / L"layout.txt";
+    }
+    if (!layout_loaded_) {
+        // Pairs recorded in earlier runs are not written again.
+        layout_loaded_ = true;
+        // Read line by line, so a line cut short by a crash is skipped and the lines after it still count.
+        if (FILE* f = _wfopen(file.c_str(), L"rb")) {
+            char line[128];
+            while (fgets(line, sizeof line, f)) {
+                unsigned long long a, b;
+                int dx, dy;
+                if (sscanf(line, "%llx %llx %d %d", &a, &b, &dx, &dy) == 4) neighbours_.known({a, b, dx, dy});
+            }
+            fclose(f);
+        }
+    }
+    const auto pairs = neighbours_.drawn(key, width, rows, dest, frames_.load());
+    if (pairs.empty()) return;
+    if (FILE* f = _wfopen(file.c_str(), L"ab")) {
+        for (const auto& p : pairs)
+            fprintf(f, "%016llx %016llx %d %d\n", static_cast<unsigned long long>(p.a), static_cast<unsigned long long>(p.b), p.dx, p.dy);
+        fclose(f);
+    }
+}
+
+void NeighbourLog::known(const Pair& pair) { reported_.insert(pair); }
+
+std::vector<NeighbourLog::Pair> NeighbourLog::drawn(uint64_t key, int width, int rows, uint32_t dest, uint32_t frame) {
+    std::vector<Pair> out;
+    for (size_t i = 0; i < recent_count_; i++) {
+        const Recent& r = recent_[i];
+        if (r.key == key || frame - r.frame > 1 || r.width != width || r.rows != rows) continue;
+        // Where this sprite lies from the earlier one, from the distance of their bottom rows in memory: whole
+        // lines of 320 pixels down, and the rest across, between 160 to the left and 159 to the right.
+        const int64_t d = int64_t(dest) - int64_t(r.dest);
+        if (d <= -kPixels || d >= kPixels) continue;
+        const int64_t n = d + 160;
+        const int dy = int(n >= 0 ? n / 320 : -((-n + 319) / 320));
+        const int dx = int(d - int64_t(dy) * 320);
+        // Only tiles on an isometric grid count: half a tile across and half a tile's height up or down. Units
+        // standing on a tile and buildings over the ground are not neighbours.
+        const int half_x = width / 2, half_y = (rows + 1) / 2;
+        if ((dx != half_x && dx != -half_x) || (dy != half_y && dy != -half_y)) continue;
+        const Pair p = r.key < key ? Pair{r.key, key, dx, dy} : Pair{key, r.key, -dx, -dy};
+        if (reported_.count(p)) continue;
+        Seen& s = seen_[p];
+        if (s.count == 0 || s.frame != frame) {
+            s.count++;
+            s.frame = frame;
+        }
+        if (s.count >= 3) {
+            seen_.erase(p);
+            reported_.insert(p);
+            out.push_back(p);
+        }
+    }
+    recent_[recent_next_] = {key, width, rows, dest, frame};
+    recent_next_ = (recent_next_ + 1) % kRecent;
+    recent_count_ = std::min(recent_count_ + 1, kRecent);
+    // Pairs that were only seen once or twice, after scrolling for example, are forgotten now and then.
+    if (seen_.size() > 10000) seen_.clear();
+    return out;
 }
 
 void HdSprites::image(const Machine& m, uint32_t data, int width, int rows, uint32_t stride, uint32_t dest, uint32_t dest_stride) {
@@ -192,6 +262,7 @@ void HdSprites::take_over(const Machine& m, const Deferred& d) {
 void HdSprites::set_screen_source(uint32_t linear) { screen_source_ = linear; }
 
 void HdSprites::frame(const Machine& m, uint32_t* refs) {
+    frames_++;
     const int64_t now = now_ms();
     for (int c = 0; c < 256; c++)
         if (std::memcmp(last_dac_[c], m.dac[c], 3) != 0) {

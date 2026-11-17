@@ -16,8 +16,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -49,6 +52,45 @@ private:
     int64_t cleared_at_ = INT64_MIN / 2;
     uint64_t cleared_for_ = 0;  // what the screen needed when the atlas was last emptied
     std::vector<Held> held_;
+};
+
+// Which sprites the game draws side by side, so that tools/ai/remaster.py can redraw tiles that belong together
+// (the four tiles of a landing pad, for example) as one picture instead of giving each tile edges of its own.
+// Two sprites count as neighbours when they have the same size, lie next to each other on an isometric tile
+// grid (half their width across and half their height up or down) and were drawn in the same or in
+// consecutive frames. Units on a tile or buildings over the ground are never neighbours, so the number of
+// pairs stays bounded by the kinds of tiles. A pair is reported once it has been seen in three frames: right after
+// the game scrolls, sprites at their old places can briefly meet sprites at their new places, and that
+// happens only in a frame or two.
+class NeighbourLog {
+public:
+    // Sprite `b` lies `dx` pixels to the right of and `dy` pixels below sprite `a`, measured from the first
+    // pixel of each sprite's bottom row. The sprite with the smaller key is always `a`.
+    struct Pair {
+        uint64_t a, b;
+        int dx, dy;
+        bool operator<(const Pair& o) const { return std::tie(a, b, dx, dy) < std::tie(o.a, o.b, o.dx, o.dy); }
+    };
+    // A sprite was drawn with the first pixel of its bottom row at linear address `dest` (line length 320)
+    // during presenter frame `frame`. Returns the pairs that have now been seen often enough to be recorded.
+    std::vector<Pair> drawn(uint64_t key, int width, int rows, uint32_t dest, uint32_t frame);
+    // A pair that is recorded already, for example in the file of an earlier run.
+    void known(const Pair& pair);
+
+private:
+    struct Recent {
+        uint64_t key;
+        int width, rows;
+        uint32_t dest, frame;
+    };
+    struct Seen {
+        uint32_t count = 0, frame = 0;
+    };
+    static constexpr size_t kRecent = 64;
+    Recent recent_[kRecent]{};
+    size_t recent_count_ = 0, recent_next_ = 0;
+    std::map<Pair, Seen> seen_;  // pairs not reported yet
+    std::set<Pair> reported_;
 };
 
 class HdSprites {
@@ -105,6 +147,9 @@ public:
     // The presenter emptied its full atlas: every picture is loaded again when it next shows on screen.
     void atlas_cleared();
 
+    // Sprites the game draws side by side are written to <folder>/layout.txt, one pair per line: the two
+    // sprites' names and where the second lies from the first (see NeighbourLog).
+
     // The atlas cells, gaps included, that the pictures seen on screen in the last frame need.
     uint64_t on_screen_cells();
 
@@ -143,6 +188,7 @@ private:
     bool settled(const std::bitset<256>& colours) const;
     std::filesystem::path original_file(uint64_t key) const;
     std::filesystem::path upscaled_file(uint64_t key) const;
+    void record_neighbours(uint64_t key, int width, int rows, uint32_t dest);
 
     std::vector<Mark> sprite_marks_, image_marks_;  // one of each per byte of memory
     std::atomic<uint32_t> screen_source_{0};
@@ -157,6 +203,9 @@ private:
     std::vector<Deferred> deferred_;
     uint8_t last_dac_[256][3]{};
     std::atomic<int64_t> colour_changed_[256]{};  // per palette entry, steady clock in milliseconds
+    std::atomic<uint32_t> frames_{0};            // frames so far, for the neighbour log
+    NeighbourLog neighbours_;                    // only used on the game thread
+    bool layout_loaded_ = false;                 // only used on the game thread
 };
 
 }  // namespace nax

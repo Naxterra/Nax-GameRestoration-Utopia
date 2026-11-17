@@ -2,6 +2,7 @@
 // folder and save folder are temporary directories, and prints one line per test with PASS or FAIL.
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -412,6 +413,104 @@ const std::vector<Test> kTests = {
          hd.placed(0, 1, 1);
          hd.frame(m, refs.data());
          return none_without_picture && hd.on_screen_cells() == 33 * 3;
+     }},
+    {"tiles_drawn_side_by_side_in_three_frames_are_recorded_once_with_where_the_second_lies", [] {
+         nax::NeighbourLog log;
+         const uint32_t a = 0x10000 + 100 * 320 + 50;  // the bottom row of tile 5
+         const uint32_t b = a + 8 * 320 + 16;          // tile 3, half a tile to the right and 8 lines lower
+         std::vector<std::vector<nax::NeighbourLog::Pair>> found;
+         for (uint32_t frame = 1; frame <= 5; frame++) {
+             auto pairs = log.drawn(5, 32, 15, a, frame);
+             for (const auto& p : log.drawn(3, 32, 15, b, frame)) pairs.push_back(p);
+             found.push_back(pairs);
+         }
+         const auto& third = found[2];
+         return found[0].empty() && found[1].empty() && third.size() == 1 && third[0].a == 3 && third[0].b == 5 &&
+                third[0].dx == -16 && third[0].dy == -8 && found[3].empty() && found[4].empty();
+     }},
+    {"tiles_that_met_only_while_the_screen_scrolled_are_not_recorded", [] {
+         nax::NeighbourLog log;
+         const uint32_t a = 0x10000 + 100 * 320 + 50;
+         bool none = log.drawn(5, 32, 15, a, 1).empty() && log.drawn(3, 32, 15, a + 8 * 320 + 16, 1).empty();
+         for (uint32_t frame = 2; frame <= 6; frame++) {  // tile 3 has moved far away since
+             none = none && log.drawn(5, 32, 15, a, frame).empty();
+             none = none && log.drawn(3, 32, 15, a + 60 * 320 + 100, frame).empty();
+         }
+         return none;
+     }},
+    {"tiles_that_only_meet_at_a_corner_are_not_neighbours", [] {
+         nax::NeighbourLog log;
+         const uint32_t a = 0x10000 + 100 * 320 + 50;
+         bool none = true;
+         for (uint32_t frame = 1; frame <= 5; frame++) {
+             none = none && log.drawn(5, 32, 15, a, frame).empty();
+             none = none && log.drawn(3, 32, 15, a + 15 * 320, frame).empty();  // directly below
+             none = none && log.drawn(4, 32, 15, a + 32, frame).empty();        // directly to the right
+         }
+         return none;
+     }},
+    {"neighbours_are_written_to_the_layout_file_once_across_runs", [] {
+         Fixture f;
+         auto run = [&f] {
+             nax::HdSprites hd;
+             hd.set_folder(f.root / L"hd");
+             std::vector<uint32_t> refs(64000);
+             for (int frame = 0; frame < 4; frame++) {
+                 f.m.mem[kSpriteData] = 0x12;
+                 hd.draw(f.m, kSpriteData, 32, 2, kDest, 0x40);
+                 f.m.mem[kSpriteData] = 0x34;
+                 hd.draw(f.m, kSpriteData, 32, 2, kDest + 320 + 16, 0x40);  // another tile, the next one on the grid
+                 hd.frame(f.m, refs.data());
+             }
+         };
+         run();
+         const std::string first = read_file(f.root / L"hd" / L"layout.txt");
+         run();
+         const std::string second = read_file(f.root / L"hd" / L"layout.txt");
+         return std::count(first.begin(), first.end(), '\n') == 1 && second == first &&
+                (first.ends_with(" 16 1\n") || first.ends_with(" -16 -1\n"));
+     }},
+    {"unit_standing_on_a_tile_and_tiles_off_the_grid_are_not_neighbours", [] {
+         nax::NeighbourLog log;
+         const uint32_t a = 0x10000 + 100 * 320 + 50;
+         bool none = true;
+         for (uint32_t frame = 1; frame <= 5; frame++) {
+             none = none && log.drawn(5, 32, 15, a, frame).empty();
+             none = none && log.drawn(3, 16, 10, a - 2 * 320 + 8, frame).empty();     // a small unit on the tile
+             none = none && log.drawn(4, 32, 15, a + 4 * 320 + 8, frame).empty();     // a tile a quarter step away
+         }
+         return none;
+     }},
+    {"layout_line_cut_short_by_a_crash_does_not_hide_the_lines_after_it", [] {
+         Fixture f;
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         // Pick the keys the two test tiles get, by recording them once in a separate folder.
+         Fixture g;
+         {
+             nax::HdSprites probe;
+             probe.set_folder(g.root / L"hd");
+             std::vector<uint32_t> refs(64000);
+             for (int frame = 0; frame < 4; frame++) {
+                 g.m.mem[kSpriteData] = 0x12;
+                 probe.draw(g.m, kSpriteData, 32, 2, kDest, 0x40);
+                 g.m.mem[kSpriteData] = 0x34;
+                 probe.draw(g.m, kSpriteData, 32, 2, kDest + 320 + 16, 0x40);
+                 probe.frame(g.m, refs.data());
+             }
+         }
+         const std::string pair = read_file(g.root / L"hd" / L"layout.txt");
+         write_file(f.root / L"hd" / L"layout.txt", "00000000000000aa 00000000000000bb 16\n" + pair);
+         std::vector<uint32_t> refs(64000);
+         for (int frame = 0; frame < 4; frame++) {
+             f.m.mem[kSpriteData] = 0x12;
+             hd.draw(f.m, kSpriteData, 32, 2, kDest, 0x40);
+             f.m.mem[kSpriteData] = 0x34;
+             hd.draw(f.m, kSpriteData, 32, 2, kDest + 320 + 16, 0x40);
+             hd.frame(f.m, refs.data());
+         }
+         const std::string after = read_file(f.root / L"hd" / L"layout.txt");
+         return !pair.empty() && after == "00000000000000aa 00000000000000bb 16\n" + pair;  // not written a second time
      }},
     {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
          Fixture f;

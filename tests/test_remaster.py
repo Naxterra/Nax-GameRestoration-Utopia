@@ -56,6 +56,45 @@ class RemasterTests(unittest.TestCase):
         self.assertLess(abs(result[..., 2].mean() - 200), 15)  # blue like the original
         self.assertGreater(result[0::4, :].mean(), result[2::4, :].mean() + 10)  # the stripes are still there
 
+    def test_pad_tiles_drawn_side_by_side_form_one_group_where_the_game_drew_them(self):
+        marked = diamond()
+        marked[7, 4:28, :3] = (255, 255, 0)
+        sprites = {n: marked.copy() for n in "abcd"}
+        sprites["ground"] = diamond()
+        pairs = [("a", "b", -16, 8), ("a", "c", 16, 8), ("b", "d", 16, 8), ("a", "ground", 0, -16),
+                 ("c", "d", -16, 8), ("b", "c", 32, 0)]
+        groups = remaster.tile_groups(sprites, pairs)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0], {"a": (0, 0), "b": (-16, 8), "c": (16, 8), "d": (0, 16)})
+
+    def test_unit_on_a_pad_tile_and_tiles_off_the_grid_are_not_joined_to_the_pad(self):
+        marked = diamond()
+        marked[7, 4:28, :3] = (255, 255, 0)
+        unit = np.zeros((15, 32, 4), np.uint8)
+        unit[4:12, 10:22] = (255, 255, 0, 255)  # a small yellow vehicle, the size of a tile but not its shape
+        sprites = {"a": marked, "b": marked.copy(), "c": marked.copy(), "unit": unit}
+        pairs = [("a", "b", 16, 8), ("a", "unit", 16, 8), ("b", "c", 8, 4)]
+        self.assertFalse(remaster.is_tile(unit))
+        self.assertEqual(remaster.tile_groups(sprites, pairs), [{"a": (0, 0), "b": (16, 8)}])
+
+    def test_tiles_of_a_group_lie_on_the_canvas_where_the_game_draws_them(self):
+        sprites = {"top": diamond(), "right": diamond(colour=(200, 200, 0))}
+        canvas, boxes = remaster.group_canvas(sprites, {"top": (0, 0), "right": (16, 8)})
+        (x0, y0, x1, _), (x2, y2, _, _) = boxes["top"], boxes["right"]
+        factor = (x1 - x0) // 32
+        self.assertEqual((x2 - x0, y2 - y0), (16 * factor, 8 * factor))
+        middle = np.asarray(canvas)[y2 + 7 * factor + factor // 2, x2 + 16 * factor]
+        self.assertEqual(tuple(middle), (200, 200, 0))  # the right tile, drawn after the top one
+
+    def test_layout_lines_cut_short_are_skipped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "layout.txt")
+            with open(path, "w", encoding="ascii") as f:
+                f.write("aa bb 16 8\ncc dd -16\nee ff x 8\n")
+            self.assertEqual(remaster.read_layout(path), [("aa", "bb", 16, 8)])
+            self.assertEqual(remaster.read_layout(os.path.join(folder, "missing.txt")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

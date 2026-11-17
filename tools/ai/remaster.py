@@ -26,6 +26,7 @@ steps. All three are under the Apache License 2.0 and are loaded from Hugging Fa
 import argparse
 import glob
 import os
+import shutil
 import sys
 
 BASE = os.path.join(os.environ["LOCALAPPDATA"], "Nax Game Restoration")
@@ -171,6 +172,27 @@ def difference(colour, rgba):
     small = np.asarray(Image.fromarray(colour, "RGB").resize((w, h), Image.BOX), np.float32)
     visible = rgba[..., 3] > 0
     return float(np.abs(small - rgba[..., :3].astype(np.float32))[visible].mean()) if visible.any() else 0.0
+
+
+def take_from_twins(sprites, names, target_of, sources):
+    """Gives each of `names` that has no picture yet the picture of a sprite with exactly the same pixels from
+    `sources`, instead of redrawing it. Such twins differ only in a colour of their palette bank that they do
+    not use, for example sprites saved by earlier versions while a lamp of that bank blinked. Returns the
+    names that got a picture."""
+    by_pixels = {}
+    for n in sorted(sources):
+        if os.path.exists(target_of(n)):
+            by_pixels.setdefault((sprites[n].shape, sprites[n].tobytes()), n)
+    copied = []
+    for name in names:
+        twin = by_pixels.get((sprites[name].shape, sprites[name].tobytes()))
+        if twin is None or twin == name or os.path.exists(target_of(name)):
+            continue
+        temporary = target_of(name) + ".part"
+        shutil.copyfile(target_of(twin), temporary)
+        upscale_sprites.replace_file(temporary, target_of(name))
+        copied.append(name)
+    return copied
 
 
 def read_layout(path):
@@ -400,6 +422,9 @@ def main():
     def wanted(name):
         return name in chosen and not is_silhouette(sprites[name]) and (args.again or not os.path.exists(target_of(name)))
 
+    if not args.again:
+        for name in take_from_twins(sprites, sorted(n for n in chosen if not is_silhouette(sprites[n])), target_of, sprites):
+            print(f"{name}.png has the same pixels as a sprite that is redrawn already and takes its picture", flush=True)
     skipped = []
     groups = tile_groups(sprites, read_layout(os.path.join(root, "layout.txt")), skipped)
     for group in skipped:
@@ -409,6 +434,14 @@ def main():
     grouped = {n for g in groups for n in g}
     groups = [g for g in groups if any(wanted(n) for n in g)]
     singles = [n for n in sorted(chosen) if wanted(n) and n not in grouped]
+    # Of several new sprites with the same pixels, one is redrawn and the others take its picture afterwards.
+    twins_later, seen_pixels = [], set()
+    if not args.again:
+        for n in singles:
+            pixels = (sprites[n].shape, sprites[n].tobytes())
+            (twins_later if pixels in seen_pixels else []).append(n)
+            seen_pixels.add(pixels)
+        singles = [n for n in singles if n not in twins_later]
     total = len(singles) + sum(wanted(n) for g in groups for n in g)
     if not total:
         print("Nothing to redraw.")
@@ -434,6 +467,7 @@ def main():
         results = remaster_group(pipe, sprites, group, args.seed, args.tries)
         for name in todo:
             save(name, results[name])
+    take_from_twins(sprites, twins_later, target_of, singles)
 
 
 if __name__ == "__main__":

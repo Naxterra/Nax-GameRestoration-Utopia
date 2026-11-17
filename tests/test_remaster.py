@@ -111,6 +111,19 @@ class RemasterTests(unittest.TestCase):
         middle = np.asarray(canvas)[y2 + 7 * factor + factor // 2, x2 + 16 * factor]
         self.assertEqual(tuple(middle), (200, 200, 0))  # the right tile, drawn after the top one
 
+    def test_sprite_with_the_same_pixels_as_a_redrawn_one_takes_its_picture_instead_of_being_redrawn(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            target_of = lambda n: os.path.join(folder, n + ".png")  # noqa: E731
+            sprites = {"old": diamond(), "new": diamond(), "other": diamond(colour=(0, 90, 0))}
+            with open(target_of("old"), "wb") as f:
+                f.write(b"redrawn picture")
+            copied = remaster.take_from_twins(sprites, ["new", "other"], target_of, sprites)
+            self.assertEqual(copied, ["new"])
+            with open(target_of("new"), "rb") as f:
+                self.assertEqual(f.read(), b"redrawn picture")
+            self.assertFalse(os.path.exists(target_of("other")))
+
     def test_layout_lines_cut_short_are_skipped(self):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:

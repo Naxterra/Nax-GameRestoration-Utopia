@@ -107,6 +107,20 @@ void draw_test_sprite(nax::Machine& m, nax::HdSprites& hd) {
     m.mem[0xA0000 + 10 * 320 + 6] = 0x42;
 }
 
+// The file name earlier versions gave the test sprite: its pixels, its width and all 15 colours of its bank.
+std::wstring legacy_name(nax::Machine& m) {
+    m.mem[kSpriteData] = 0x12;
+    uint64_t legacy = 0xcbf29ce484222325ull;
+    auto mix = [&legacy](uint8_t v) { legacy = (legacy ^ v) * 0x100000001b3ull; };
+    for (uint32_t i = 0; i < 32; i++) mix(m.mem[kSpriteData + i]);
+    mix(32);
+    for (int c = 1; c < 16; c++)
+        for (int k = 0; k < 3; k++) mix(m.dac[0x40 + c][k]);
+    wchar_t name[32];
+    swprintf(name, 32, L"%016llx.png", static_cast<unsigned long long>(legacy));
+    return name;
+}
+
 struct Test {
     const char* name;
     std::function<bool()> run;
@@ -337,18 +351,38 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return hd.sprite_count() == 1 && refs[10 * 320 + 5] == nax::HdSprites::encode(100, 201, 1 + 1);
      }},
+    {"picture_written_under_the_earlier_name_after_the_rename_is_still_taken_over", [] {
+         Fixture f;
+         const std::wstring name = legacy_name(f.m);
+         write_file(f.root / L"hd" / L"original" / name, "old original");
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         draw_test_sprite(f.m, hd);  // renames the original; no picture yet
+         const bool missing = hd.missing_count() == 1;
+         write_file(f.root / L"hd" / L"upscaled" / name, "late picture");  // a redraw that started earlier finishes
+         hd.take_pending();
+         std::vector<fs::path> upscaled;
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"upscaled")) upscaled.push_back(e.path());
+         return missing && hd.missing_count() == 0 && upscaled.size() == 1 && upscaled[0].filename() != name &&
+                read_file(upscaled[0]) == "late picture";
+     }},
+    {"layout_pairs_follow_a_sprite_to_its_new_name", [] {
+         Fixture f;
+         const std::wstring name = legacy_name(f.m);
+         write_file(f.root / L"hd" / L"original" / name, "old original");
+         const std::string old_key(name.begin(), name.begin() + 16);
+         write_file(f.root / L"hd" / L"layout.txt", "0000000000000001 " + old_key + " 16 8\n0000000000000001 0000000000000002 -16 8\n");
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         draw_test_sprite(f.m, hd);
+         std::string new_key;
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"original")) new_key = e.path().stem().string();
+         return new_key != old_key &&
+                read_file(f.root / L"hd" / L"layout.txt") == "0000000000000001 " + new_key + " 16 8\n0000000000000001 0000000000000002 -16 8\n";
+     }},
     {"pictures_saved_under_the_earlier_name_are_taken_over", [] {
          Fixture f;
-         // The earlier name covered the pixels, the width and all 15 colours of the bank.
-         f.m.mem[kSpriteData] = 0x12;
-         uint64_t legacy = 0xcbf29ce484222325ull;
-         auto mix = [&legacy](uint8_t v) { legacy = (legacy ^ v) * 0x100000001b3ull; };
-         for (uint32_t i = 0; i < 32; i++) mix(f.m.mem[kSpriteData + i]);
-         mix(32);
-         for (int c = 1; c < 16; c++)
-             for (int k = 0; k < 3; k++) mix(f.m.dac[0x40 + c][k]);
-         wchar_t name[32];
-         swprintf(name, 32, L"%016llx.png", static_cast<unsigned long long>(legacy));
+         const std::wstring name = legacy_name(f.m);
          write_file(f.root / L"hd" / L"original" / name, "old original");
          write_file(f.root / L"hd" / L"upscaled" / name, "old picture");
          nax::HdSprites hd;

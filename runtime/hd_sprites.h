@@ -170,6 +170,7 @@ private:
     enum class State : uint8_t { missing, unloaded, pending, placed, failed };
     struct Slot {
         uint64_t key;
+        uint64_t legacy;  // the name earlier versions gave the sprite, after all 15 colours of its bank
         int width, rows;
         State state;
         uint32_t atlas;           // x | y << 16 once placed
@@ -191,6 +192,7 @@ private:
     std::filesystem::path original_file(uint64_t key) const;
     std::filesystem::path upscaled_file(uint64_t key) const;
     void record_neighbours(uint64_t key, int width, int rows, uint32_t dest);
+    void rename_in_layout(const std::filesystem::path& file, uint64_t from, uint64_t to);
 
     std::vector<Mark> sprite_marks_, image_marks_;  // one of each per byte of memory
     std::atomic<uint32_t> screen_source_{0};

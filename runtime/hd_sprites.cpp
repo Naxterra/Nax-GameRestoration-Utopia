@@ -1,5 +1,7 @@
 #include "hd_sprites.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +20,14 @@ constexpr size_t kMaxDeferred = 32;
 // The 64-bit FNV-1a hash that identifies each sprite.
 constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ull;
 constexpr uint64_t kFnvPrime = 0x100000001b3ull;
+
+// Moves `from` to `to` when `to` does not exist yet. Returns whether it was moved.
+bool moved(const std::filesystem::path& from, const std::filesystem::path& to) {
+    std::error_code ec;
+    if (std::filesystem::exists(to, ec) || !std::filesystem::exists(from, ec)) return false;
+    std::filesystem::rename(from, to, ec);
+    return !ec;
+}
 
 int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -74,11 +84,51 @@ bool HdSprites::settled(const std::bitset<256>& colours) const {
     return true;
 }
 
+// The sprites' pairs in the layout file under their new names, once their pictures have moved to them.
+void HdSprites::rename_in_layout(const std::filesystem::path& file, uint64_t from, uint64_t to) {
+    std::vector<NeighbourLog::Pair> pairs;
+    FILE* f = _wfopen(file.c_str(), L"rb");
+    if (!f) return;
+    char line[128];
+    bool changed = false;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long a, b;
+        int dx, dy;
+        if (sscanf(line, "%llx %llx %d %d", &a, &b, &dx, &dy) != 4) continue;
+        NeighbourLog::Pair p{a, b, dx, dy};
+        if (p.a == from || p.b == from) {
+            changed = true;
+            if (p.a == from) p.a = to;
+            if (p.b == from) p.b = to;
+            if (p.a > p.b) p = {p.b, p.a, -p.dx, -p.dy};
+        }
+        pairs.push_back(p);
+    }
+    fclose(f);
+    if (!changed) return;
+    // Written next to the file and moved over it, so an interrupted write leaves the old file.
+    const std::filesystem::path temporary = file.wstring() + L".part";
+    FILE* out = _wfopen(temporary.c_str(), L"wb");
+    if (!out) return;
+    bool ok = true;
+    for (const auto& p : pairs)
+        ok = ok && fprintf(out, "%016llx %016llx %d %d\n", static_cast<unsigned long long>(p.a), static_cast<unsigned long long>(p.b), p.dx, p.dy) > 0;
+    ok = fclose(out) == 0 && ok;
+    if (!ok || !MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        std::error_code ec;
+        std::filesystem::remove(temporary, ec);
+        return;
+    }
+    // Pairs that were loaded already are known under their new names too, so they are not written again.
+    if (layout_loaded_)
+        for (const auto& p : pairs) neighbours_.known(p);
+}
+
 // Called without the lock held: the lock is taken only to look the sprite up and to add it, and the picture is
 // saved in between, so neither thread waits for a file to be written.
 uint32_t HdSprites::slot_for(uint64_t id, uint64_t legacy, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
                              const std::function<std::vector<uint32_t>()>& picture) {
-    std::filesystem::path original, upscaled, old_original, old_upscaled;
+    std::filesystem::path original, upscaled, old_original, old_upscaled, layout;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = by_key_.find(id);
@@ -88,16 +138,18 @@ uint32_t HdSprites::slot_for(uint64_t id, uint64_t legacy, int width, int rows, 
             upscaled = upscaled_file(id);
             old_original = original_file(legacy);
             old_upscaled = upscaled_file(legacy);
+            layout = folder_ / L"layout.txt";
         }
     }
     State state = State::missing;
     if (!original.empty()) {
         std::error_code ec;
-        // A sprite saved under its earlier name keeps its pictures under the new one.
-        if (legacy != id && !std::filesystem::exists(original, ec) && std::filesystem::exists(old_original, ec)) {
-            if (std::filesystem::exists(old_upscaled, ec) && !std::filesystem::exists(upscaled, ec))
-                std::filesystem::rename(old_upscaled, upscaled, ec);
-            std::filesystem::rename(old_original, original, ec);
+        // A sprite saved under its earlier name keeps its pictures under the new one. The upscaled picture is
+        // also looked for later (see take_pending), in case it is written under the earlier name afterwards or
+        // cannot be moved now.
+        if (legacy != id) {
+            moved(old_upscaled, upscaled);
+            if (!std::filesystem::exists(original, ec) && moved(old_original, original)) rename_in_layout(layout, legacy, id);
         }
         if (!std::filesystem::exists(original, ec)) write_png(original, picture().data(), unsigned(width), unsigned(rows), 1, true);
         if (std::filesystem::exists(upscaled, ec)) state = State::unloaded;
@@ -106,7 +158,7 @@ uint32_t HdSprites::slot_for(uint64_t id, uint64_t legacy, int width, int rows, 
     auto it = by_key_.find(id);
     if (it != by_key_.end()) return it->second;
     const uint32_t slot = uint32_t(slots_.size());
-    slots_.push_back({id, width, rows, state, 0, colours, palette, true});
+    slots_.push_back({id, legacy, width, rows, state, 0, colours, palette, true});
     by_key_.emplace(id, slot);
     return slot;
 }
@@ -393,6 +445,9 @@ std::vector<HdSprites::Pending> HdSprites::take_pending() {
         Slot& s = slots_[i];
         if (s.state == State::missing && scan) {
             std::error_code ec;
+            // A picture written under the sprite's earlier name, by a redraw that started before the game
+            // renamed the sprite, is moved to the new name.
+            if (s.legacy != s.key) moved(upscaled_file(s.legacy), upscaled_file(s.key));
             if (std::filesystem::exists(upscaled_file(s.key), ec)) s.state = State::unloaded;
         }
         if (s.state == State::pending) out.push_back({i, upscaled_file(s.key), s.width, s.rows});

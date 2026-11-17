@@ -76,9 +76,9 @@ bool HdSprites::settled(const std::bitset<256>& colours) const {
 
 // Called without the lock held: the lock is taken only to look the sprite up and to add it, and the picture is
 // saved in between, so neither thread waits for a file to be written.
-uint32_t HdSprites::slot_for(uint64_t id, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
+uint32_t HdSprites::slot_for(uint64_t id, uint64_t legacy, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
                              const std::function<std::vector<uint32_t>()>& picture) {
-    std::filesystem::path original, upscaled;
+    std::filesystem::path original, upscaled, old_original, old_upscaled;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = by_key_.find(id);
@@ -86,11 +86,19 @@ uint32_t HdSprites::slot_for(uint64_t id, int width, int rows, const std::bitset
         if (!folder_.empty()) {
             original = original_file(id);
             upscaled = upscaled_file(id);
+            old_original = original_file(legacy);
+            old_upscaled = upscaled_file(legacy);
         }
     }
     State state = State::missing;
     if (!original.empty()) {
         std::error_code ec;
+        // A sprite saved under its earlier name keeps its pictures under the new one.
+        if (legacy != id && !std::filesystem::exists(original, ec) && std::filesystem::exists(old_original, ec)) {
+            if (std::filesystem::exists(old_upscaled, ec) && !std::filesystem::exists(upscaled, ec))
+                std::filesystem::rename(old_upscaled, upscaled, ec);
+            std::filesystem::rename(old_original, original, ec);
+        }
         if (!std::filesystem::exists(original, ec)) write_png(original, picture().data(), unsigned(width), unsigned(rows), 1, true);
         if (std::filesystem::exists(upscaled, ec)) state = State::unloaded;
     }
@@ -105,21 +113,35 @@ uint32_t HdSprites::slot_for(uint64_t id, int width, int rows, const std::bitset
 
 void HdSprites::draw(const Machine& m, uint32_t data, int width, int rows, uint32_t dest, uint8_t base) {
     if (width <= 0 || width > 256 || rows <= 0 || rows > 256) return;
-    std::bitset<256> colours;
-    for (int c = 1; c < 16; c++) colours.set(uint8_t(base + c));
-    // While the colours fade, every step would look like another sprite, so sprites wait until they settle.
-    if (!settled(colours)) return;
     const uint32_t stride = uint32_t(width / 2);
+    // Only the palette entries the sprite's pixels actually use count, for its key, for waiting while colours
+    // fade and for when its upscaled picture gives way to the original pixels: games often let another colour
+    // of the same bank blink or cycle (a lamp, a cursor), and that must not make every sprite of the bank
+    // flicker back to its pixels or be saved again for every state of that colour.
+    std::bitset<256> used;
+    for (uint32_t i = 0; i < stride * uint32_t(rows); i++) {
+        const uint8_t byte = m.mem[(data + i) & 0xFFFFF];
+        if (byte >> 4) used.set(uint8_t(base + (byte >> 4)));
+        if (byte & 0x0F) used.set(uint8_t(base + (byte & 0x0F)));
+    }
+    // While the colours fade, every step would look like another sprite, so sprites wait until they settle.
+    if (!settled(used)) return;
     // The key covers the pixels and the colours they are drawn in, so a sprite shown with another palette
     // (another planet, for example) is a sprite of its own.
     uint64_t id = kFnvBasis;
-    auto mix = [&id](uint8_t v) { id = (id ^ v) * kFnvPrime; };
-    for (uint32_t i = 0; i < stride * uint32_t(rows); i++) mix(m.mem[(data + i) & 0xFFFFF]);
-    mix(uint8_t(width));
+    auto mix = [](uint64_t& h, uint8_t v) { h = (h ^ v) * kFnvPrime; };
+    for (uint32_t i = 0; i < stride * uint32_t(rows); i++) mix(id, m.mem[(data + i) & 0xFFFFF]);
+    mix(id, uint8_t(width));
+    // Earlier versions named sprites after all 15 colours of the bank; their pictures are taken over.
+    uint64_t legacy = id;
     for (int c = 1; c < 16; c++)
-        for (int k = 0; k < 3; k++) mix(m.dac[uint8_t(base + c)][k]);
+        for (int k = 0; k < 3; k++) {
+            const uint8_t v = m.dac[uint8_t(base + c)][k];
+            mix(legacy, v);
+            if (used[uint8_t(base + c)]) mix(id, v);
+        }
 
-    const uint32_t slot = slot_for(id, width, rows, colours, palette_of(m, colours), [&] {
+    const uint32_t slot = slot_for(id, legacy, width, rows, used, palette_of(m, used), [&] {
         // Stored top row first, as pictures are, with transparent pixels where colour 0 is.
         std::vector<uint32_t> rgba(size_t(width) * size_t(rows));
         for (int y = 0; y < rows; y++) {
@@ -183,7 +205,10 @@ std::vector<NeighbourLog::Pair> NeighbourLog::drawn(uint64_t key, int width, int
     std::vector<Pair> out;
     for (size_t i = 0; i < recent_count_; i++) {
         const Recent& r = recent_[i];
-        if (r.key == key || frame - r.frame > 1 || r.width != width || r.rows != rows) continue;
+        // The pieces of one building can differ in height, but tiles of one grid have the same width. A flat
+        // tile (at most half as high as wide) and a tall sprite are never neighbours, so buildings and units
+        // over the ground are left out.
+        if (r.key == key || frame - r.frame > 1 || r.width != width || (r.rows <= width / 2) != (rows <= width / 2)) continue;
         // Where this sprite lies from the earlier one, from the distance of their bottom rows in memory: whole
         // lines of 320 pixels down, and the rest across, between 160 to the left and 159 to the right.
         const int64_t d = int64_t(dest) - int64_t(r.dest);
@@ -191,9 +216,10 @@ std::vector<NeighbourLog::Pair> NeighbourLog::drawn(uint64_t key, int width, int
         const int64_t n = d + 160;
         const int dy = int(n >= 0 ? n / 320 : -((-n + 319) / 320));
         const int dx = int(d - int64_t(dy) * 320);
-        // Only tiles on an isometric grid count: half a tile across and half a tile's height up or down. Units
-        // standing on a tile and buildings over the ground are not neighbours.
-        const int half_x = width / 2, half_y = (rows + 1) / 2;
+        // Only tiles on an isometric grid count: half a tile across and a quarter of its width up or down, for
+        // flat tiles and for the pieces of a building that stands on several tiles alike. Units standing on a
+        // tile and buildings over the ground are not neighbours.
+        const int half_x = width / 2, half_y = width / 4;
         if ((dx != half_x && dx != -half_x) || (dy != half_y && dy != -half_y)) continue;
         const Pair p = r.key < key ? Pair{r.key, key, dx, dy} : Pair{key, r.key, -dx, -dy};
         if (reported_.count(p)) continue;
@@ -248,7 +274,7 @@ void HdSprites::take_over(const Machine& m, const Deferred& d) {
         mix(m.dac[c][1]);
         mix(m.dac[c][2]);
     }
-    const uint32_t slot = slot_for(id, d.width, d.rows, colours, palette_of(m, colours), [&] {
+    const uint32_t slot = slot_for(id, id, d.width, d.rows, colours, palette_of(m, colours), [&] {
         std::vector<uint32_t> rgba(d.pixels.size());
         for (size_t i = 0; i < rgba.size(); i++) rgba[i] = colour_of(m, d.pixels[i]);
         return rgba;

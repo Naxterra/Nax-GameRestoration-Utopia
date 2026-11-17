@@ -2,6 +2,7 @@
 
 #include <d3dcompiler.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -19,7 +20,7 @@ namespace {
 // The last step rearranges the 48 output channels into a picture four times as large ("pixel shuffle") and
 // adds the original picture, enlarged without smoothing, as the network expects.
 const char kShader[] = R"(
-cbuffer Layer : register(b0) { uint w_off; uint b_off; uint a_off; uint cin; uint flags; uint unused; };
+cbuffer Layer : register(b0) { uint w_off; uint b_off; uint a_off; uint cin; uint flags; uint x0; uint y0; uint x1; uint y1; };
 Texture2D<float4> picture : register(t0);
 StructuredBuffer<float> weights : register(t1);
 RWStructuredBuffer<float> fin : register(u0);
@@ -38,8 +39,8 @@ float input_at(uint c, int x, int y) {
 
 [numthreads(16, 8, 1)]
 void conv(uint3 id : SV_DispatchThreadID) {
-    int x = id.x, y = id.y;
-    if (x >= W || y >= H) return;
+    int x = id.x + x0, y = id.y + y0;
+    if (x >= (int)x1 || y >= (int)y1) return;
     uint ob = id.z * OUTS;
     float acc[OUTS];
     [unroll] for (uint k = 0; k < OUTS; k++) acc[k] = weights[b_off + ob + k];
@@ -62,8 +63,8 @@ void conv(uint3 id : SV_DispatchThreadID) {
 
 [numthreads(16, 8, 1)]
 void shuffle(uint3 id : SV_DispatchThreadID) {
-    int X = id.x, Y = id.y;
-    if (X >= W * 4 || Y >= H * 4) return;
+    int X = id.x + x0 * 4, Y = id.y + y0 * 4;
+    if (X >= (int)x1 * 4 || Y >= (int)y1 * 4) return;
     int x = X / 4, y = Y / 4, i = Y % 4, j = X % 4;
     float4 base = picture.Load(int3(x, y, 0));
     float r = fin[(0 * 16 + i * 4 + j) * N + y * W + x] + base.r;
@@ -204,7 +205,7 @@ bool AiUpscaler::init(ID3D12Device* device, UINT64 timestamp_frequency, const st
     ranges[1].OffsetInDescriptorsFromTableStart = 1;
     D3D12_ROOT_PARAMETER params[5]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.Num32BitValues = 6;
+    params[0].Constants.Num32BitValues = 9;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     params[1].Descriptor.ShaderRegister = 1;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
@@ -259,8 +260,15 @@ double AiUpscaler::last_gpu_ms() {
     return ms;
 }
 
-void AiUpscaler::record(ID3D12GraphicsCommandList* list, ID3D12Resource* picture) {
+void AiUpscaler::record(ID3D12GraphicsCommandList* list, ID3D12Resource* picture, Rect changed) {
     if (!ready_) return;
+    if (changed.x0 >= changed.x1 || changed.y0 >= changed.y1) return;  // nothing changed
+    // Outside the recomputed part, the feature buffers hold whatever earlier layers left there, so a partial
+    // run only writes the result where every value it reads was computed in this run. The first run has no
+    // earlier result to keep and covers the whole picture.
+    if (!has_run_) changed = kWhole;
+    has_run_ = true;
+    const int count = int(layers_.size());
     if (!weights_copied_) {
         list->CopyBufferRegion(weights_.Get(), 0, weights_upload_.Get(), 0, weights_bytes_);
         const auto b = transition(weights_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -289,18 +297,23 @@ void AiUpscaler::record(ID3D12GraphicsCommandList* list, ID3D12Resource* picture
     int src = 0;
     for (size_t i = 0; i < layers_.size(); i++) {
         const Layer& l = layers_[i];
-        const uint32_t constants[6] = {l.weights, l.biases, l.slopes, l.in_channels, (i == 0 ? 1u : 0u) | (l.prelu ? 2u : 0u), 0};
-        list->SetComputeRoot32BitConstants(0, 6, constants, 0);
+        const Rect r = region(changed, count, int(i));
+        const uint32_t constants[9] = {l.weights, l.biases, l.slopes, l.in_channels, (i == 0 ? 1u : 0u) | (l.prelu ? 2u : 0u),
+                                       uint32_t(r.x0), uint32_t(r.y0), uint32_t(r.x1), uint32_t(r.y1)};
+        list->SetComputeRoot32BitConstants(0, 9, constants, 0);
         list->SetComputeRootUnorderedAccessView(2, features_[src]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(3, features_[1 - src]->GetGPUVirtualAddress());
-        list->Dispatch((kInWidth + 15) / 16, (kInHeight + 7) / 8, l.out_channels / kOuts);
+        list->Dispatch(UINT(r.x1 - r.x0 + 15) / 16, UINT(r.y1 - r.y0 + 7) / 8, l.out_channels / kOuts);
         list->ResourceBarrier(1, &uav_barrier);
         src = 1 - src;
     }
+    const Rect out = region(changed, count, count);
+    const uint32_t constants[9] = {0, 0, 0, 0, 0, uint32_t(out.x0), uint32_t(out.y0), uint32_t(out.x1), uint32_t(out.y1)};
+    list->SetComputeRoot32BitConstants(0, 9, constants, 0);
     list->SetPipelineState(shuffle_.Get());
     list->SetComputeRootUnorderedAccessView(2, features_[src]->GetGPUVirtualAddress());
     list->SetComputeRootUnorderedAccessView(3, features_[1 - src]->GetGPUVirtualAddress());
-    list->Dispatch(kOutWidth / 16, kOutHeight / 8, 1);
+    list->Dispatch(UINT(out.x1 - out.x0) * kScale / 16 + 1, UINT(out.y1 - out.y0) * kScale / 8 + 1, 1);
     const auto done = transition(result_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     list->ResourceBarrier(1, &done);
     result_readable_ = true;

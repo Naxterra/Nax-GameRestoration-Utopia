@@ -77,6 +77,31 @@ class RemasterTests(unittest.TestCase):
         self.assertFalse(remaster.is_tile(unit))
         self.assertEqual(remaster.tile_groups(sprites, pairs), [{"a": (0, 0), "b": (16, 8)}])
 
+    def test_four_pieces_of_a_building_on_four_tiles_form_one_group_but_a_whole_row_does_not(self):
+        def piece(rows):
+            p = np.zeros((rows, 32, 4), np.uint8)
+            p[2:, 4:28] = (200, 120, 40, 255)  # a tall building piece
+            return p
+        # Like the command center: a low piece at the back, two side pieces and a tall one at the front.
+        sprites = {"a": piece(23), "b": piece(28), "c": piece(28), "d": piece(30)}
+        pairs = [("a", "b", -16, 8), ("a", "c", 16, 8), ("b", "d", 16, 8)]
+        self.assertEqual(remaster.tile_groups(sprites, pairs), [{"a": (0, 0), "b": (-16, 8), "c": (16, 8), "d": (0, 16)}])
+        # Two one-tile buildings side by side do not make a square, so neither is joined, and that is reported.
+        skipped = []
+        self.assertEqual(remaster.tile_groups({"house": piece(28), "shop": piece(20)}, [("house", "shop", 16, 8)], skipped), [])
+        self.assertEqual(skipped, [{"house": (0, 0), "shop": (16, 8)}])
+        row = {f"p{k}": piece(28) for k in range(12)}
+        chain = [(f"p{k}", f"p{k + 1}", 16, 8) for k in range(11)]
+        self.assertEqual(remaster.tile_groups(row, chain), [])
+
+    def test_unit_standing_on_a_tile_is_not_taken_for_a_building_piece(self):
+        unit = np.zeros((24, 32, 4), np.uint8)
+        unit[4:20, 10:22] = (90, 90, 120, 255)  # a vehicle in the middle of its tile, ground free around it
+        building = np.zeros((24, 32, 4), np.uint8)
+        building[2:, 1:31] = (200, 120, 40, 255)
+        self.assertIsNone(remaster.kind_of(unit))
+        self.assertEqual(remaster.kind_of(building), "building")
+
     def test_tiles_of_a_group_lie_on_the_canvas_where_the_game_draws_them(self):
         sprites = {"top": diamond(), "right": diamond(colour=(200, 200, 0))}
         canvas, boxes = remaster.group_canvas(sprites, {"top": (0, 0), "right": (16, 8)})

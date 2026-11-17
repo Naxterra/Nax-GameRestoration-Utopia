@@ -55,13 +55,15 @@ private:
 };
 
 // Which sprites the game draws side by side, so that tools/ai/remaster.py can redraw tiles that belong together
-// (the four tiles of a landing pad, for example) as one picture instead of giving each tile edges of its own.
-// Two sprites count as neighbours when they have the same size, lie next to each other on an isometric tile
-// grid (half their width across and half their height up or down) and were drawn in the same or in
-// consecutive frames. Units on a tile or buildings over the ground are never neighbours, so the number of
-// pairs stays bounded by the kinds of tiles. A pair is reported once it has been seen in three frames: right after
-// the game scrolls, sprites at their old places can briefly meet sprites at their new places, and that
-// happens only in a frame or two.
+// (the four tiles of a landing pad, or the pieces of a building on several tiles) as one picture instead of
+// giving each piece edges of its own. Two sprites count as neighbours when they have the same width, are both
+// flat (at most half as high as wide) or both tall, lie next to each other on an isometric tile grid (half
+// their width across and a quarter of their width up or down, measured at their bottom rows) and were drawn
+// in the same or in consecutive frames. A building or a unit over a ground tile is therefore never a
+// neighbour of it. Tall sprites side by side are, whether they are pieces of one building or a unit standing
+// next to a building; remaster.py tells these apart. A pair is reported once it has been seen in three
+// frames: right after the game scrolls, sprites at their old places can briefly meet sprites at their new
+// places, and that happens only in a frame or two.
 class NeighbourLog {
 public:
     // Sprite `b` lies `dx` pixels to the right of and `dy` pixels below sprite `a`, measured from the first
@@ -171,7 +173,7 @@ private:
         int width, rows;
         State state;
         uint32_t atlas;           // x | y << 16 once placed
-        std::bitset<256> colours;  // the palette entries the sprite uses
+        std::bitset<256> colours;  // the palette entries the sprite's pixels use
         uint64_t palette;          // their colours when the sprite was saved
         bool current = true;       // whether those entries still have those colours (updated each frame)
         uint32_t seen = 0;         // the last frame in which the sprite was on screen
@@ -182,7 +184,7 @@ private:
         uint32_t dest, dest_stride;
     };
 
-    uint32_t slot_for(uint64_t id, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
+    uint32_t slot_for(uint64_t id, uint64_t legacy, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
                       const std::function<std::vector<uint32_t>()>& picture);
     void take_over(const Machine& m, const Deferred& d);
     bool settled(const std::bitset<256>& colours) const;

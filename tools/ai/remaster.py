@@ -9,9 +9,10 @@ as detailed artwork while keeping its shape, layout and colours. The model sees 
 pixels on a plain background and returns a new picture of the same layout; the part where the sprite was is
 cut out, reduced to eight times the original size, and given the original's outline as smooth transparency.
 
-Flat tiles with painted markings that the game draws side by side, such as the four tiles of a landing pad, are
-redrawn together as one picture and cut apart again, so the pad keeps its markings running across the tiles
-instead of every tile getting edges of its own. The runtime records which sprites lie side by side in
+Flat tiles with painted markings that the game draws side by side, such as the four tiles of a landing pad, and
+the pieces of a building that stands on several tiles, such as the command center, are redrawn together as one
+picture and cut apart again, so the pad keeps its markings running across the tiles and the building stays
+one building, instead of every piece getting edges of its own. The runtime records which sprites lie side by side in
 hd\\layout.txt.
 
 Sprites drawn while the screen was black (every visible pixel black) are skipped, because nothing can be
@@ -202,20 +203,49 @@ def is_tile(rgba):
     return union > 0 and (diamond & visible).sum() / union >= 0.85
 
 
-def tile_groups(sprites, pairs):
-    """Flat marked tiles that the game draws side by side, such as the four tiles of a landing pad, grouped
-    together with where each one's bottom row starts. Redrawn alone, each tile would get edges of its own, so a
-    pad would look like several small pads. `sprites` maps names to pictures. Returns one dictionary from name
-    to position per group of two or more tiles."""
-    flat = {n for n, rgba in sprites.items()
-            if not is_silhouette(rgba) and prompt_for(rgba) is FLAT_PROMPT and is_tile(rgba)}
+MAX_GROUP = 9  # larger groups, a whole row of buildings for example, would leave too few pixels per tile
+
+
+def stands_on_whole_tile(rgba):
+    """Whether a tall sprite covers the lower half of the diamond of the tile it stands on, as a building piece
+    does. A unit or a tree standing on a tile leaves most of that ground free."""
+    h, w = rgba.shape[:2]
+    y = np.arange(h)[:, None] + 0.5
+    x = np.arange(w)[None, :] + 0.5
+    middle = h - w / 4  # the middle row of the tile's diamond, which ends at the sprite's bottom row
+    lower = (np.abs(x - w / 2) / (w / 2) + np.abs(y - middle) / (w / 4) <= 1.0) & (y >= middle)
+    return lower.any() and (rgba[..., 3] > 0)[lower].mean() >= 0.85
+
+
+def kind_of(rgba):
+    """'flat' for a floor tile with painted markings, 'building' for a tall sprite that fills its tile, None for
+    anything else (ground, silhouettes, and sprites of other shapes such as units)."""
+    if is_silhouette(rgba):
+        return None
+    prompt = prompt_for(rgba)
+    if prompt is BUILDING_PROMPT:
+        return "building" if stands_on_whole_tile(rgba) else None
+    return "flat" if prompt is FLAT_PROMPT and is_tile(rgba) else None
+
+
+def tile_groups(sprites, pairs, skipped=None):
+    """Sprites that the game draws side by side on its tile grid and that belong together: flat marked tiles
+    such as the four tiles of a landing pad, and the pieces of a building that stands on several tiles, such as
+    the command center. Each group comes with where each sprite's bottom row starts. Redrawn alone, every piece
+    would get edges of its own, so a pad or a building would look like several small ones. `sprites` maps names
+    to pictures. Returns one dictionary from name to position per group of two to MAX_GROUP sprites. Sprites
+    that lie side by side but form no such group are added to the list `skipped`, one dictionary per set."""
+    kinds = {n: kind_of(rgba) for n, rgba in sprites.items()}
     links = {}
     for a, b, dx, dy in pairs:
-        if a not in flat or b not in flat or sprites[a].shape != sprites[b].shape:
+        if a not in kinds or b not in kinds or not kinds[a] or kinds[a] != kinds[b]:
             continue
-        h, w = sprites[a].shape[:2]
-        # Only neighbours on the isometric grid: half a tile across and half a tile's height up or down.
-        if abs(dx) == w // 2 and abs(dy) == (h + 1) // 2:
+        # Tiles of one grid have the same width; the pieces of one building can differ in height.
+        if sprites[a].shape[1] != sprites[b].shape[1] or (kinds[a] == "flat" and sprites[a].shape != sprites[b].shape):
+            continue
+        w = sprites[a].shape[1]
+        # Only neighbours on the isometric grid: half a tile across and a quarter of its width up or down.
+        if abs(dx) == w // 2 and abs(dy) == w // 4:
             links.setdefault(a, []).append((b, dx, dy))
             links.setdefault(b, []).append((a, -dx, -dy))
     groups, placed = [], set()
@@ -233,8 +263,28 @@ def tile_groups(sprites, pairs):
                     group[other] = (x + dx, y + dy)
                     queue.append(other)
         placed.update(group)
+        # A building standing on several tiles covers a full square of them. Pieces that do not fill one are
+        # separate buildings standing side by side and are redrawn alone.
+        if len(group) > MAX_GROUP or (kinds[start] == "building" and not fills_square(group, sprites[start].shape[1])):
+            if skipped is not None:
+                skipped.append(group)
+            continue
         groups.append(group)
     return groups
+
+
+def fills_square(group, width):
+    """Whether the positions of a group fill a square of n by n tiles of the isometric grid, for n = 2 or 3."""
+    cells = set()
+    for x, y in group.values():
+        # One step along one axis of the grid is (half a tile, a quarter tile), along the other (-half, quarter).
+        a, b = x / (width / 2), y / (width / 4)
+        cells.add((round((a + b) / 2), round((b - a) / 2)))
+    if len(cells) != len(group):
+        return False
+    us, vs = {u for u, _ in cells}, {v for _, v in cells}
+    n = len(us)
+    return n in (2, 3) and len(vs) == n and len(cells) == n * n
 
 
 def group_canvas(sprites, group):
@@ -295,9 +345,10 @@ def remaster_group(pipe, sprites, group, seed, tries=1):
     """Redraws a group of tiles as one picture, `tries` times, keeps the version closest to the originals over
     all its tiles, and cuts each tile out of it. Returns a dictionary from name to redrawn tile."""
     canvas, boxes = group_canvas(sprites, group)
+    prompt = BUILDING_PROMPT if kind_of(sprites[next(iter(group))]) == "building" else GROUP_PROMPT
     best, best_difference = None, None
     for attempt in range(tries):
-        out = redraw(pipe, canvas, GROUP_PROMPT, seed + attempt)
+        out = redraw(pipe, canvas, prompt, seed + attempt)
         colours = {n: cut(out, boxes[n], sprites[n]) for n in group}
         d = sum(difference(colours[n], sprites[n]) for n in group)
         if best is None or d < best_difference:
@@ -349,7 +400,12 @@ def main():
     def wanted(name):
         return name in chosen and not is_silhouette(sprites[name]) and (args.again or not os.path.exists(target_of(name)))
 
-    groups = tile_groups(sprites, read_layout(os.path.join(root, "layout.txt")))
+    skipped = []
+    groups = tile_groups(sprites, read_layout(os.path.join(root, "layout.txt")), skipped)
+    for group in skipped:
+        if any(wanted(n) for n in group):
+            print(f"These {len(group)} sprites lie side by side but are not one building or pad, so each is redrawn "
+                  f"alone: {', '.join(sorted(group))}", flush=True)
     grouped = {n for g in groups for n in g}
     groups = [g for g in groups if any(wanted(n) for n in g)]
     singles = [n for n in sorted(chosen) if wanted(n) and n not in grouped]

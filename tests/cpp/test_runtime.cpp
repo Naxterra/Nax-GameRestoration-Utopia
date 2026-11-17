@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/ai_upscaler.h"
 #include "runtime/audio.h"
 #include "runtime/hd_sprites.h"
 #include "runtime/machine.h"
@@ -314,6 +315,52 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return before && refs[10 * 320 + 5] == nax::HdSprites::kNone;
      }},
+    {"upscaled_sprite_stays_while_a_colour_of_its_bank_that_it_does_not_use_blinks", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         draw_test_sprite(m, hd);  // uses only the colours 41h and 42h of the bank 40h
+         hd.placed(0, 100, 200);
+         std::vector<uint32_t> refs(64000);
+         m.dac[0x45][0] ^= 0x10;  // a lamp of the same bank blinks
+         hd.frame(m, refs.data());
+         return refs[10 * 320 + 5] != nax::HdSprites::kNone;
+     }},
+    {"sprite_drawn_again_after_a_colour_it_does_not_use_changed_keeps_its_name_and_picture", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         draw_test_sprite(m, hd);
+         hd.placed(0, 100, 200);
+         std::vector<uint32_t> refs(64000);
+         m.dac[0x45][0] ^= 0x10;  // a lamp of the same bank has changed and stays so
+         hd.frame(m, refs.data());  // notices the change
+         draw_test_sprite(m, hd);   // the game draws the sprite again at once
+         hd.frame(m, refs.data());
+         return hd.sprite_count() == 1 && refs[10 * 320 + 5] == nax::HdSprites::encode(100, 201, 1 + 1);
+     }},
+    {"pictures_saved_under_the_earlier_name_are_taken_over", [] {
+         Fixture f;
+         // The earlier name covered the pixels, the width and all 15 colours of the bank.
+         f.m.mem[kSpriteData] = 0x12;
+         uint64_t legacy = 0xcbf29ce484222325ull;
+         auto mix = [&legacy](uint8_t v) { legacy = (legacy ^ v) * 0x100000001b3ull; };
+         for (uint32_t i = 0; i < 32; i++) mix(f.m.mem[kSpriteData + i]);
+         mix(32);
+         for (int c = 1; c < 16; c++)
+             for (int k = 0; k < 3; k++) mix(f.m.dac[0x40 + c][k]);
+         wchar_t name[32];
+         swprintf(name, 32, L"%016llx.png", static_cast<unsigned long long>(legacy));
+         write_file(f.root / L"hd" / L"original" / name, "old original");
+         write_file(f.root / L"hd" / L"upscaled" / name, "old picture");
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         draw_test_sprite(f.m, hd);
+         std::vector<fs::path> originals, upscaled;
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"original")) originals.push_back(e.path());
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"upscaled")) upscaled.push_back(e.path());
+         return originals.size() == 1 && upscaled.size() == 1 && originals[0].filename() != name &&
+                read_file(upscaled[0]) == "old picture" && upscaled[0].filename() == originals[0].filename() && hd.take_pending().empty() &&
+                hd.missing_count() == 0;
+     }},
     {"emptied_atlas_asks_again_only_for_pictures_that_show_on_screen", [] {
          Fixture f;
          nax::HdSprites hd;
@@ -414,6 +461,19 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return none_without_picture && hd.on_screen_cells() == 33 * 3;
      }},
+    {"moved_pointer_reruns_the_ai_filter_only_around_it_with_each_earlier_layer_one_pixel_wider", [] {
+         using U = nax::AiUpscaler;
+         const U::Rect pointer{100, 50, 112, 59};  // a 12x9 pointer
+         const U::Rect out = U::region(pointer, 8, 8), last = U::region(pointer, 8, 7), first = U::region(pointer, 8, 0);
+         const bool result = out.x0 == 92 && out.y0 == 42 && out.x1 == 120 && out.y1 == 67;
+         const bool layers = last.x0 == 92 && first.x0 == 85 && first.x1 == 127 && U::region(pointer, 8, 1).x0 == 86;
+         return result && layers;
+     }},
+    {"ai_filter_region_near_the_edge_stays_inside_the_picture", [] {
+         using U = nax::AiUpscaler;
+         const U::Rect r = U::region({0, 195, 5, 200}, 8, 0);
+         return r.x0 == 0 && r.y0 == 180 && r.x1 == 20 && r.y1 == 200;
+     }},
     {"tiles_drawn_side_by_side_in_three_frames_are_recorded_once_with_where_the_second_lies", [] {
          nax::NeighbourLog log;
          const uint32_t a = 0x10000 + 100 * 320 + 50;  // the bottom row of tile 5
@@ -459,7 +519,7 @@ const std::vector<Test> kTests = {
                  f.m.mem[kSpriteData] = 0x12;
                  hd.draw(f.m, kSpriteData, 32, 2, kDest, 0x40);
                  f.m.mem[kSpriteData] = 0x34;
-                 hd.draw(f.m, kSpriteData, 32, 2, kDest + 320 + 16, 0x40);  // another tile, the next one on the grid
+                 hd.draw(f.m, kSpriteData, 32, 2, kDest + 8 * 320 + 16, 0x40);  // another tile, the next one on the grid
                  hd.frame(f.m, refs.data());
              }
          };
@@ -468,7 +528,7 @@ const std::vector<Test> kTests = {
          run();
          const std::string second = read_file(f.root / L"hd" / L"layout.txt");
          return std::count(first.begin(), first.end(), '\n') == 1 && second == first &&
-                (first.ends_with(" 16 1\n") || first.ends_with(" -16 -1\n"));
+                (first.ends_with(" 16 8\n") || first.ends_with(" -16 -8\n"));
      }},
     {"unit_standing_on_a_tile_and_tiles_off_the_grid_are_not_neighbours", [] {
          nax::NeighbourLog log;
@@ -495,7 +555,7 @@ const std::vector<Test> kTests = {
                  g.m.mem[kSpriteData] = 0x12;
                  probe.draw(g.m, kSpriteData, 32, 2, kDest, 0x40);
                  g.m.mem[kSpriteData] = 0x34;
-                 probe.draw(g.m, kSpriteData, 32, 2, kDest + 320 + 16, 0x40);
+                 probe.draw(g.m, kSpriteData, 32, 2, kDest + 8 * 320 + 16, 0x40);
                  probe.frame(g.m, refs.data());
              }
          }
@@ -506,7 +566,7 @@ const std::vector<Test> kTests = {
              f.m.mem[kSpriteData] = 0x12;
              hd.draw(f.m, kSpriteData, 32, 2, kDest, 0x40);
              f.m.mem[kSpriteData] = 0x34;
-             hd.draw(f.m, kSpriteData, 32, 2, kDest + 320 + 16, 0x40);
+             hd.draw(f.m, kSpriteData, 32, 2, kDest + 8 * 320 + 16, 0x40);
              hd.frame(f.m, refs.data());
          }
          const std::string after = read_file(f.root / L"hd" / L"layout.txt");

@@ -666,12 +666,26 @@ void Presenter::draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, 
     texture_readable_ = true;
     upload_hd(i);
 
-    // The network runs only when the picture has changed since its last run.
+    // The network runs only when the picture has changed since its last run, and only around the pixels that
+    // changed: when just the mouse pointer moves, that is a small part of the screen.
     const bool use_ai = filter == kAiFilter && ai_.ready();
     if (use_ai) {
         const size_t pixels = size_t(kWidth) * kHeight;
-        if (ai_input_.size() != pixels || std::memcmp(ai_input_.data(), rgba, pixels * 4) != 0) {
-            ai_.record(list_.Get(), texture_.Get());
+        AiUpscaler::Rect changed = AiUpscaler::kWhole;
+        if (ai_input_.size() == pixels) {
+            changed = {int(kWidth), int(kHeight), 0, 0};
+            for (int y = 0; y < int(kHeight); y++) {
+                const uint32_t* now = rgba + size_t(y) * kWidth;
+                const uint32_t* before = ai_input_.data() + size_t(y) * kWidth;
+                if (std::memcmp(now, before, kWidth * 4) == 0) continue;
+                for (int x = 0; x < int(kWidth); x++)
+                    if (now[x] != before[x]) {
+                        changed = {std::min(changed.x0, x), std::min(changed.y0, y), std::max(changed.x1, x + 1), y + 1};
+                    }
+            }
+        }
+        if (changed.x0 < changed.x1) {
+            ai_.record(list_.Get(), texture_.Get(), changed);
             ai_input_.assign(rgba, rgba + pixels);
         }
     }

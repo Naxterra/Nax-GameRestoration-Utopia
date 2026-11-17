@@ -110,8 +110,9 @@ void build_frame(nax::Machine& m, nax::HdSprites& hd, std::vector<uint32_t>& out
     }
 }
 
-// Runs tools/ai/generate_sprites.py in the background whenever the game has saved sprites that have no
-// upscaled picture yet, provided the PyTorch environment described in the README exists. The tool writes each
+// Runs tools/ai/remaster.py in the background whenever the game has saved sprites that have no redrawn
+// picture yet, provided the PyTorch environment described in the README exists. It only uses models that are
+// already on the machine. The tool writes each
 // picture under a temporary name and moves it into place, and the game picks the pictures up by itself.
 class SpriteRedrawer {
 public:
@@ -121,7 +122,7 @@ public:
         python_ = std::filesystem::path(local) / L"Nax Game Restoration" / L"ai-env" / L"Scripts" / L"python.exe";
         std::error_code ec;
         for (const auto& root : {exe_dir, exe_dir.parent_path().parent_path()})
-            if (std::filesystem::exists(root / L"tools" / L"ai" / L"generate_sprites.py", ec)) root_ = root;
+            if (std::filesystem::exists(root / L"tools" / L"ai" / L"remaster.py", ec)) root_ = root;
         enabled_ = !root_.empty() && std::filesystem::exists(python_, ec);
         log_ = hd_folder / L"redraw.log";
         std::filesystem::remove(log_, ec);  // the log covers this session only
@@ -143,8 +144,8 @@ public:
         const size_t count = hd.sprite_count();
         if (hd.missing_count() == 0 || count == count_at_last_run_) return;
         count_at_last_run_ = count;
-        std::wstring command = L"\"" + python_.wstring() + L"\" -I \"" + (root_ / L"tools" / L"ai" / L"generate_sprites.py").wstring() +
-                               L"\" " + game::data_folder_name();
+        std::wstring command = L"\"" + python_.wstring() + L"\" -I \"" + (root_ / L"tools" / L"ai" / L"remaster.py").wstring() +
+                               L"\" " + game::data_folder_name() + L" --offline";
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
         HANDLE out = CreateFileW(log_.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         STARTUPINFOW si{};

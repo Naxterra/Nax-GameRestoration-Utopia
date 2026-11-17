@@ -366,6 +366,35 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return hd.sprite_count() == 10;
      }},
+    {"full_atlas_is_emptied_once_and_not_again_while_the_same_crowded_screen_stays", [] {
+         nax::AtlasClearing clearing(1000);
+         const bool first = clearing.overflow(0, 400);         // the screen has moved on: emptied
+         const bool soon = clearing.overflow(5000, 400);       // full again at once, so emptying did not help
+         const bool later = clearing.overflow(20000, 400);     // the same screen ten seconds later
+         const bool much_later = clearing.overflow(50000, 400);
+         return first && !soon && !later && !much_later;
+     }},
+    {"full_atlas_is_not_emptied_when_the_screen_alone_needs_more_than_half_of_it", [] {
+         nax::AtlasClearing clearing(1000);
+         return !clearing.overflow(0, 501) && clearing.overflow(1, 500);
+     }},
+    {"full_atlas_is_emptied_again_after_a_minute_without_running_full", [] {
+         nax::AtlasClearing clearing(1000);
+         const bool first = clearing.overflow(0, 400);
+         const bool soon = clearing.overflow(5000, 400);
+         return first && !soon && clearing.overflow(70000, 400);
+     }},
+    {"room_needed_on_screen_counts_each_shown_sprite_once_with_its_gap", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         draw_test_sprite(m, hd);  // a 32x2 sprite, two of whose pixels show
+         std::vector<uint32_t> refs(64000);
+         hd.frame(m, refs.data());
+         const bool none_without_picture = hd.on_screen_cells() == 0;
+         hd.placed(0, 1, 1);
+         hd.frame(m, refs.data());
+         return none_without_picture && hd.on_screen_cells() == 33 * 3;
+     }},
     {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
          Fixture f;
          nax::HdSprites hd;

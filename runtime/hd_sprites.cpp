@@ -1,5 +1,6 @@
 #include "hd_sprites.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -221,11 +222,17 @@ void HdSprites::frame(const Machine& m, uint32_t* refs) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& s : slots_)
         if (s.state == State::placed) s.current = palette_of(m, s.colours) == s.palette;
+    const uint32_t frame_no = ++frame_count_;
+    uint64_t cells = 0;
     auto ref_of = [&](const Mark& mark, uint8_t colour) -> uint32_t {
         if (!mark.slot || mark.slot > slots_.size() || colour != mark.colour) return kNone;
         Slot& s = slots_[mark.slot - 1];
         // A picture that shows on screen but is not in the atlas is asked for.
         if (s.state == State::unloaded) s.state = State::pending;
+        if (s.seen != frame_no && (s.state == State::pending || s.state == State::placed)) {
+            s.seen = frame_no;
+            cells += uint64_t(s.width + 1) * uint64_t(s.rows + 1);
+        }
         if (s.state != State::placed || !s.current) return kNone;
         return encode((s.atlas & 0xFFFF) + mark.x, (s.atlas >> 16) + mark.y, mark.order);
     };
@@ -249,6 +256,25 @@ void HdSprites::frame(const Machine& m, uint32_t* refs) {
         refs[i] = ref_of(sprite_marks_[at], colour);
         if (refs[i] == kNone) refs[i] = ref_of(image_marks_[at], colour);
     }
+    on_screen_cells_ = cells;
+}
+
+uint64_t HdSprites::on_screen_cells() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return on_screen_cells_;
+}
+
+bool AtlasClearing::overflow(int64_t now_ms, uint64_t on_screen) {
+    if (now_ms - last_overflow_ > 60000) limit_ = UINT64_MAX;
+    last_overflow_ = now_ms;
+    if (now_ms - cleared_at_ < 10000) {
+        // The last emptying did not help: a screen that needs as much is not emptied for again.
+        limit_ = std::min(limit_, on_screen * 3 / 4);
+        return false;
+    }
+    if (on_screen > capacity_ / 2 || on_screen >= limit_) return false;
+    cleared_at_ = now_ms;
+    return true;
 }
 
 std::vector<HdSprites::Pending> HdSprites::take_pending() {

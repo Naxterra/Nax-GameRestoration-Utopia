@@ -482,12 +482,13 @@ void Presenter::upload_hd(UINT frame) {
     // uploaded. The rest stays pending and comes in the next frames.
     size_t budget = size_t(16) << 20;
     for (const auto& p : pending) {
-        const size_t bytes = size_t(p.width) * k * size_t(p.rows) * k * 4;
-        if (bytes > budget && budget != (size_t(16) << 20)) break;
-        budget -= std::min(budget, bytes);
         // Sprites are packed in rows ("shelves") with a gap of one original pixel between them. The place is
         // found before the picture is read, so a full atlas costs no decoding.
         const UINT cw = UINT(p.width) + 1, ch = UINT(p.rows) + 1;
+        if (cw > kAtlasCells - 2 || ch > kAtlasCells - 2) {
+            hd_->failed(p.slot);  // larger than even an empty atlas
+            continue;
+        }
         UINT x = shelf_x_, y = shelf_y_, shelf_height = shelf_height_;
         if (x + cw > kAtlasCells - 1) {
             x = 1;
@@ -495,21 +496,24 @@ void Presenter::upload_hd(UINT frame) {
             shelf_height = 0;
         }
         if (y + ch > kAtlasCells - 1) {
-            // The atlas is full. It is emptied, and the tracker asks again for each picture as soon as it shows
-            // on screen. If it was emptied only a moment ago, the screen needs more at once than fits: this
-            // picture keeps its original pixels for now and is asked for again the next time it shows, which
-            // costs nothing more than this check until the atlas may be emptied again.
-            const auto now = std::chrono::steady_clock::now();
-            if (now - atlas_cleared_at_ < std::chrono::seconds(10)) {
+            // The atlas is full. Whether it is emptied is decided by AtlasClearing (see hd_sprites.h). After
+            // emptying, the tracker asks again for each picture as soon as it shows on screen. Otherwise this
+            // picture keeps its original pixels and is asked for again the next time it shows, which costs no
+            // more than this check.
+            const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (!clearing_.overflow(now, hd_->on_screen_cells())) {
                 hd_->no_room(p.slot);
                 continue;
             }
-            atlas_cleared_at_ = now;
             shelf_x_ = shelf_y_ = 1;
             shelf_height_ = 0;
             hd_->atlas_cleared();
             break;
         }
+        const size_t bytes = size_t(p.width) * k * size_t(p.rows) * k * 4;
+        if (bytes > budget && budget != (size_t(16) << 20)) break;
+        budget -= std::min(budget, bytes);
         UINT w = 0, h = 0;
         std::vector<uint8_t> rgba;
         if (!load_picture(p.file, &w, &h, &rgba)) {
@@ -526,9 +530,6 @@ void Presenter::upload_hd(UINT frame) {
             hd_->failed(p.slot);
             continue;
         }
-        shelf_x_ = x + cw;
-        shelf_y_ = y;
-        shelf_height_ = std::max(shelf_height, ch);
 
         const UINT pitch = (w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
         D3D12_HEAP_PROPERTIES uh{};
@@ -559,6 +560,10 @@ void Presenter::upload_hd(UINT frame) {
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, w, h, 1, pitch};
         list_->CopyTextureRegion(&dst, x * k, y * k, 0, &src, nullptr);
+        // The place is taken only now that the copy is recorded, so a picture that failed leaves no gap.
+        shelf_x_ = x + cw;
+        shelf_y_ = y;
+        shelf_height_ = std::max(shelf_height, ch);
         atlas_uploads_[frame].push_back(buffer);
         hd_->placed(p.slot, uint16_t(x), uint16_t(y));
     }

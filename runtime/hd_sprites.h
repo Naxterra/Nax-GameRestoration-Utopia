@@ -25,6 +25,25 @@ namespace nax {
 
 class Machine;
 
+// Decides whether a full texture atlas is emptied to make room. Emptying helps when the screen has moved on
+// to other pictures, but not when the pictures on screen alone fill the atlas: then each emptying would only
+// make every upscaled picture flicker back to its original pixels while the same set is loaded again. So the
+// atlas is only emptied when the pictures on screen need at most half of it, at most once every 10 seconds,
+// and after an emptying that did not help (the atlas was full again within those 10 seconds), not again for a
+// screen that needs as much, until a minute has passed without the atlas running full.
+class AtlasClearing {
+public:
+    explicit AtlasClearing(uint64_t capacity) : capacity_(capacity) {}
+    // A picture found no room. `on_screen` is the room the pictures on screen need, in the same unit as the
+    // capacity. Returns whether the atlas is to be emptied now.
+    bool overflow(int64_t now_ms, uint64_t on_screen);
+
+private:
+    uint64_t capacity_;
+    int64_t cleared_at_ = INT64_MIN / 2, last_overflow_ = INT64_MIN / 2;
+    uint64_t limit_ = UINT64_MAX;
+};
+
 class HdSprites {
 public:
     static constexpr int kScale = 8;                 // the atlas holds pictures eight times as large (four is doubled)
@@ -79,6 +98,9 @@ public:
     // The presenter emptied its full atlas: every picture is loaded again when it next shows on screen.
     void atlas_cleared();
 
+    // The atlas cells, gaps included, that the pictures seen on screen in the last frame need.
+    uint64_t on_screen_cells();
+
     size_t sprite_count();
     size_t missing_count();  // saved sprites without an upscaled picture yet
 
@@ -100,6 +122,7 @@ private:
         std::bitset<256> colours;  // the palette entries the sprite uses
         uint64_t palette;          // their colours when the sprite was saved
         bool current = true;       // whether those entries still have those colours (updated each frame)
+        uint32_t seen = 0;         // the last frame in which the sprite was on screen
     };
     struct Deferred {
         std::vector<uint8_t> pixels;
@@ -117,6 +140,8 @@ private:
     std::vector<Mark> sprite_marks_, image_marks_;  // one of each per byte of memory
     std::atomic<uint32_t> screen_source_{0};
     uint32_t draw_count_ = 0;  // only used on the game thread
+    uint32_t frame_count_ = 0;
+    uint64_t on_screen_cells_ = 0;
     std::mutex mutex_;
     std::vector<Slot> slots_;
     std::unordered_map<uint64_t, uint32_t> by_key_;

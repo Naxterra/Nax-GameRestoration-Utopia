@@ -80,7 +80,7 @@ private:
     bool atlas_failed_ = false;
     // Packing starts one cell in, so every sprite has an empty cell before it as well as after it.
     UINT shelf_x_ = 1, shelf_y_ = 1, shelf_height_ = 0;
-    std::chrono::steady_clock::time_point atlas_cleared_at_{};
+    AtlasClearing clearing_{uint64_t(kAtlasCells - 2) * (kAtlasCells - 2)};
 };
 
 }  // namespace nax

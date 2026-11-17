@@ -313,7 +313,7 @@ const std::vector<Test> kTests = {
          hd.frame(m, refs.data());
          return before && refs[10 * 320 + 5] == nax::HdSprites::kNone;
      }},
-    {"emptied_atlas_loads_placed_pictures_again", [] {
+    {"emptied_atlas_asks_again_only_for_pictures_that_show_on_screen", [] {
          Fixture f;
          nax::HdSprites hd;
          hd.set_folder(f.root / L"hd");
@@ -323,7 +323,48 @@ const std::vector<Test> kTests = {
          hd.placed(0, 1, 1);
          const bool none_after_placing = hd.take_pending().empty();
          hd.atlas_cleared();
-         return none_after_placing && hd.take_pending().size() == 1;
+         std::vector<uint32_t> refs(64000);
+         const uint32_t at = 0xA0000 + 10 * 320 + 5;
+         f.m.mem[at] = f.m.mem[at + 1] = 0x07;  // the sprite is not on screen
+         hd.frame(f.m, refs.data());
+         const bool none_while_hidden = hd.take_pending().empty();
+         f.m.mem[at] = 0x41;  // the sprite shows again
+         hd.frame(f.m, refs.data());
+         return none_after_placing && none_while_hidden && hd.take_pending().size() == 1;
+     }},
+    {"picture_without_room_in_full_atlas_is_asked_for_again_when_it_shows", [] {
+         Fixture f;
+         nax::HdSprites hd;
+         hd.set_folder(f.root / L"hd");
+         draw_test_sprite(f.m, hd);
+         for (const auto& e : fs::directory_iterator(f.root / L"hd" / L"original"))
+             fs::copy_file(e.path(), f.root / L"hd" / L"upscaled" / e.path().filename());
+         std::vector<uint32_t> refs(64000);
+         hd.take_pending();  // finds the upscaled picture on disk
+         hd.frame(f.m, refs.data());
+         const bool asked = hd.take_pending().size() == 1;
+         hd.no_room(0);  // the atlas was full
+         const bool waits = hd.take_pending().empty();
+         hd.frame(f.m, refs.data());
+         return asked && waits && hd.take_pending().size() == 1;
+     }},
+    {"waiting_picture_covered_by_a_newer_one_is_dropped_and_nine_others_all_wait", [] {
+         nax::Machine m;
+         nax::HdSprites hd;
+         hd.set_screen_source(kBuffer);
+         for (int c = 0; c < 16; c++) m.dac[0x20 + c][0] = uint8_t(c + 1);
+         auto picture = [&](uint32_t line, uint32_t lines, uint8_t colour) {
+             for (uint32_t i = 0; i < 320 * lines; i++) m.mem[kBuffer + line * 320 + i] = colour;
+             hd.image(m, kBuffer + line * 320, 320, int(lines), 320, kBuffer + line * 320, 320);
+         };
+         picture(0, 10, 0x20);   // covered completely by the next picture
+         picture(0, 20, 0x21);
+         for (uint32_t k = 0; k < 9; k++) picture(20 + k * 10, 10, uint8_t(0x22 + k));
+         std::vector<uint32_t> refs(64000);
+         hd.frame(m, refs.data());
+         Sleep(600);
+         hd.frame(m, refs.data());
+         return hd.sprite_count() == 10;
      }},
     {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
          Fixture f;

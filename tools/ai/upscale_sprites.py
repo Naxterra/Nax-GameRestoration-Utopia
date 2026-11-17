@@ -80,6 +80,19 @@ def replace_file(temporary, target):
             time.sleep(0.25)
 
 
+def remove_stale_parts(paths, age=60.0):
+    """Removes temporary pictures that a stopped run left behind. Every tool writes a temporary picture in one
+    go and moves it into place at once, so a file that has not changed for `age` seconds was abandoned, while a
+    younger one may belong to a run that is still going (for example a texture painted by hand) and is kept."""
+    now = time.time()
+    for path in paths:
+        try:
+            if now - os.path.getmtime(path) > age:
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def load_model(path):
     """Returns a function that upscales an RGB picture four times."""
     if path.lower().endswith(".pth"):

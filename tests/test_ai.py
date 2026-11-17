@@ -5,6 +5,7 @@ import pickle
 import struct
 import sys
 import tempfile
+import time
 import types
 import unittest
 import zipfile
@@ -278,6 +279,17 @@ class SpriteTests(unittest.TestCase):
                     self.assertEqual(f.read(), b"old")
         finally:
             upscale_sprites.time.sleep = original_sleep
+
+    def test_abandoned_temporary_picture_is_removed_and_one_still_being_written_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old, fresh = os.path.join(tmp, "a.png.part"), os.path.join(tmp, "ground.png.part")
+            for path in (old, fresh):
+                with open(path, "wb") as f:
+                    f.write(b"x")
+            os.utime(old, (time.time() - 600, time.time() - 600))
+            upscale_sprites.remove_stale_parts([old, fresh, os.path.join(tmp, "gone.part")])
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(fresh))
 
     def test_transparent_pixels_take_colour_of_visible_neighbours_and_visible_ones_stay(self):
         rgb = np.zeros((3, 4, 3), np.uint8)

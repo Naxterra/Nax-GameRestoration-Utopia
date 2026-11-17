@@ -485,6 +485,31 @@ void Presenter::upload_hd(UINT frame) {
         const size_t bytes = size_t(p.width) * k * size_t(p.rows) * k * 4;
         if (bytes > budget && budget != (size_t(16) << 20)) break;
         budget -= std::min(budget, bytes);
+        // Sprites are packed in rows ("shelves") with a gap of one original pixel between them. The place is
+        // found before the picture is read, so a full atlas costs no decoding.
+        const UINT cw = UINT(p.width) + 1, ch = UINT(p.rows) + 1;
+        UINT x = shelf_x_, y = shelf_y_, shelf_height = shelf_height_;
+        if (x + cw > kAtlasCells - 1) {
+            x = 1;
+            y += shelf_height;
+            shelf_height = 0;
+        }
+        if (y + ch > kAtlasCells - 1) {
+            // The atlas is full. It is emptied, and the tracker asks again for each picture as soon as it shows
+            // on screen. If it was emptied only a moment ago, the screen needs more at once than fits: this
+            // picture keeps its original pixels for now and is asked for again the next time it shows, which
+            // costs nothing more than this check until the atlas may be emptied again.
+            const auto now = std::chrono::steady_clock::now();
+            if (now - atlas_cleared_at_ < std::chrono::seconds(10)) {
+                hd_->no_room(p.slot);
+                continue;
+            }
+            atlas_cleared_at_ = now;
+            shelf_x_ = shelf_y_ = 1;
+            shelf_height_ = 0;
+            hd_->atlas_cleared();
+            break;
+        }
         UINT w = 0, h = 0;
         std::vector<uint8_t> rgba;
         if (!load_picture(p.file, &w, &h, &rgba)) {
@@ -501,31 +526,9 @@ void Presenter::upload_hd(UINT frame) {
             hd_->failed(p.slot);
             continue;
         }
-        // Sprites are packed in rows ("shelves") with a gap of one original pixel between them.
-        const UINT cw = UINT(p.width) + 1, ch = UINT(p.rows) + 1;
-        if (shelf_x_ + cw > kAtlasCells - 1) {
-            shelf_x_ = 1;
-            shelf_y_ += shelf_height_;
-            shelf_height_ = 0;
-        }
-        if (shelf_y_ + ch > kAtlasCells - 1) {
-            // The atlas is full. It is emptied, and whatever is on screen is loaded again in the next frames,
-            // unless that happened only a moment ago: then more is needed at once than fits, and this one stays
-            // with its original pixels.
-            const auto now = std::chrono::steady_clock::now();
-            if (now - atlas_cleared_at_ < std::chrono::seconds(10)) {
-                hd_->failed(p.slot);
-                continue;
-            }
-            atlas_cleared_at_ = now;
-            shelf_x_ = shelf_y_ = 1;
-            shelf_height_ = 0;
-            hd_->atlas_cleared();
-            break;
-        }
-        const UINT x = shelf_x_, y = shelf_y_;
-        shelf_x_ += cw;
-        shelf_height_ = std::max(shelf_height_, ch);
+        shelf_x_ = x + cw;
+        shelf_y_ = y;
+        shelf_height_ = std::max(shelf_height, ch);
 
         const UINT pitch = (w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
         D3D12_HEAP_PROPERTIES uh{};

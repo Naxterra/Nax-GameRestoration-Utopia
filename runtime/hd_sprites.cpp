@@ -13,7 +13,7 @@ namespace {
 constexpr uint32_t kVideo = 0xA0000;
 constexpr int kPixels = 320 * 200;
 constexpr int64_t kSettleMs = 500;
-constexpr size_t kMaxDeferred = 8;
+constexpr size_t kMaxDeferred = 32;
 // The 64-bit FNV-1a hash that identifies each sprite.
 constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ull;
 constexpr uint64_t kFnvPrime = 0x100000001b3ull;
@@ -91,7 +91,7 @@ uint32_t HdSprites::slot_for(uint64_t id, int width, int rows, const std::bitset
     if (!original.empty()) {
         std::error_code ec;
         if (!std::filesystem::exists(original, ec)) write_png(original, picture().data(), unsigned(width), unsigned(rows), 1, true);
-        if (std::filesystem::exists(upscaled, ec)) state = State::pending;
+        if (std::filesystem::exists(upscaled, ec)) state = State::unloaded;
     }
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = by_key_.find(id);
@@ -151,7 +151,15 @@ void HdSprites::image(const Machine& m, uint32_t data, int width, int rows, uint
     for (int y = 0; y < rows; y++)
         for (int x = 0; x < width; x++) d.pixels[size_t(y) * size_t(width) + size_t(x)] = m.mem[(data + uint32_t(y) * stride + uint32_t(x)) & 0xFFFFF];
     std::lock_guard<std::mutex> lock(mutex_);
-    // Only the latest few wait; an older picture would be covered by a newer one at the same place anyway.
+    // A waiting picture that the new one covers completely would never be seen, so it is dropped. Beyond that
+    // at most kMaxDeferred pictures wait, and only then the oldest gives way.
+    auto covered = [&d](const Deferred& old) {
+        if (old.dest_stride != d.dest_stride || !d.dest_stride) return false;
+        const int64_t ox = old.dest % old.dest_stride, oy = old.dest / old.dest_stride;
+        const int64_t nx = d.dest % d.dest_stride, ny = d.dest / d.dest_stride;
+        return ox >= nx && oy >= ny && ox + old.width <= nx + d.width && oy + old.rows <= ny + d.rows;
+    };
+    std::erase_if(deferred_, covered);
     if (deferred_.size() >= kMaxDeferred) deferred_.erase(deferred_.begin());
     deferred_.push_back(std::move(d));
 }
@@ -215,7 +223,9 @@ void HdSprites::frame(const Machine& m, uint32_t* refs) {
         if (s.state == State::placed) s.current = palette_of(m, s.colours) == s.palette;
     auto ref_of = [&](const Mark& mark, uint8_t colour) -> uint32_t {
         if (!mark.slot || mark.slot > slots_.size() || colour != mark.colour) return kNone;
-        const Slot& s = slots_[mark.slot - 1];
+        Slot& s = slots_[mark.slot - 1];
+        // A picture that shows on screen but is not in the atlas is asked for.
+        if (s.state == State::unloaded) s.state = State::pending;
         if (s.state != State::placed || !s.current) return kNone;
         return encode((s.atlas & 0xFFFF) + mark.x, (s.atlas >> 16) + mark.y, mark.order);
     };
@@ -253,7 +263,7 @@ std::vector<HdSprites::Pending> HdSprites::take_pending() {
         Slot& s = slots_[i];
         if (s.state == State::missing && scan) {
             std::error_code ec;
-            if (std::filesystem::exists(upscaled_file(s.key), ec)) s.state = State::pending;
+            if (std::filesystem::exists(upscaled_file(s.key), ec)) s.state = State::unloaded;
         }
         if (s.state == State::pending) out.push_back({i, upscaled_file(s.key), s.width, s.rows});
     }
@@ -272,10 +282,15 @@ void HdSprites::failed(uint32_t slot) {
     if (slot < slots_.size()) slots_[slot].state = State::failed;
 }
 
+void HdSprites::no_room(uint32_t slot) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (slot < slots_.size() && slots_[slot].state == State::pending) slots_[slot].state = State::unloaded;
+}
+
 void HdSprites::atlas_cleared() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& s : slots_)
-        if (s.state == State::placed) s.state = State::pending;
+        if (s.state == State::placed || s.state == State::pending) s.state = State::unloaded;
 }
 
 size_t HdSprites::sprite_count() {

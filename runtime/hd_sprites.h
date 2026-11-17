@@ -62,8 +62,11 @@ public:
     static uint32_t encode(uint32_t x, uint32_t y, uint32_t order) { return (x & 0x3FF) | ((y & 0x3FF) << 10) | (order << 20); }
     void frame(const Machine& m, uint32_t* refs);
 
-    // Upscaled pictures that exist on disk but are not in the atlas yet. The presenter loads each one and
-    // reports its position with placed(), or with failed() when it cannot be used.
+    // Upscaled pictures that exist on disk and were seen on screen, but are not in the atlas yet. Pictures are
+    // only loaded once they show, so the atlas holds what the game has displayed, not every picture on disk.
+    // The presenter loads each one and reports its position with placed(), with failed() when the picture
+    // cannot be used, or with no_room() when the atlas is full: such a picture is asked for again the next
+    // time it shows.
     struct Pending {
         uint32_t slot;
         std::filesystem::path file;
@@ -72,7 +75,8 @@ public:
     std::vector<Pending> take_pending();
     void placed(uint32_t slot, uint16_t x, uint16_t y);
     void failed(uint32_t slot);
-    // The presenter emptied its full atlas: every placed picture is loaded again when it is next needed.
+    void no_room(uint32_t slot);
+    // The presenter emptied its full atlas: every picture is loaded again when it next shows on screen.
     void atlas_cleared();
 
     size_t sprite_count();
@@ -85,7 +89,9 @@ private:
         uint8_t colour = 0;  // the colour the sprite put there, to notice when something else was drawn over it
         uint16_t order = 0;  // see encode()
     };
-    enum class State : uint8_t { missing, pending, placed, failed };
+    // missing: no upscaled picture on disk. unloaded: a picture on disk that is not in the atlas and is asked
+    // for as soon as it shows. pending: asked for. placed: in the atlas. failed: the picture cannot be used.
+    enum class State : uint8_t { missing, unloaded, pending, placed, failed };
     struct Slot {
         uint64_t key;
         int width, rows;

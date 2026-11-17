@@ -144,16 +144,12 @@ def main():
         sys.exit(f"No saved sprites in {os.path.join(root, 'original')}. Play the game for a while first.")
     out_dir = args.out or os.path.join(root, "upscaled")
     os.makedirs(out_dir, exist_ok=True)
-    # Pictures left half-written by a run that was stopped.
-    for stale in glob.glob(os.path.join(out_dir, "*.part")) + glob.glob(os.path.join(root, "*.part")):
-        try:
-            os.remove(stale)
-        except OSError:
-            pass
+    texture_path = args.texture or os.path.join(root, "ground.png")
+    # Pictures left half-written by a run that was stopped: this tool's sprites and its ground texture.
+    upscale_sprites.remove_stale_parts(glob.glob(os.path.join(glob.escape(out_dir), "*.part")) + [texture_path + ".part"])
     device = "cuda"
     esrgan = GpuRrdb(os.path.join(BASE, "models", "RealESRGAN_x4plus.pth"), device)
     pipe = load_diffusion(device) if args.strength > 0 else None
-    texture_path = args.texture or os.path.join(root, "ground.png")
     if args.paint_texture and not os.path.exists(texture_path):
         try:
             import generate_texture

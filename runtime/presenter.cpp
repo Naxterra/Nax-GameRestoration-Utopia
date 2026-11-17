@@ -109,15 +109,48 @@ float3 ai_shapes(float2 uv) {
             snapped(uv + float2(o.x, o.y))) * 0.25;
 }
 
+// A sprite's upscaled picture has a smooth outline, while the game's pixels have stair steps. So at every
+// point the picture of the pixel underneath and those of its eight neighbours are read, each continued to this
+// point, and of those whose outline covers the point, the one drawn last is shown. A neighbour belonging to the
+// same sprite continues the same picture, so only other sprites and the ground compete.
+float4 hd_part(uint r, float2 local) {
+    float2 cell = float2(r & 0x3FF, (r >> 10) & 0x3FF);
+    return atlas.SampleLevel(smooth, (cell + local) / 1024.0, 0);  // the atlas spans 1024 original pixels
+}
+int order_of(uint r) { return int(r >> 20); }
+// True when drawing order a lies above b, with the count starting again after 4095 (0 is always below).
+bool above(int a, int b) {
+    if (b == 0) return a != 0;
+    if (a == 0) return false;
+    int d = (a - b + 4095) % 4095;
+    return d != 0 && d < 2048;
+}
 float3 ai_picture(float2 uv) {
     float2 s = uv * size;
     int2 p = clamp(int2(floor(s)), int2(0, 0), int2(319, 199));
+    float2 f = s - p;
     uint r = refs.Load(int3(p, 0));
-    if (r != 0xFFFFFFFFu) {
-        float2 cell = float2(r & 0xFFFF, r >> 16);
-        return atlas.SampleLevel(smooth, (cell + (s - p)) / 1024.0, 0).rgb;  // the atlas spans 1024 original pixels
+    if (r == 0xFFFFFFFFu) return ai_shapes(uv);
+    float4 own = hd_part(r, f);
+    float3 colour = own.rgb;
+    int top = own.a >= 0.5 ? order_of(r) : -1;
+    [unroll] for (int dy = -1; dy <= 1; dy++) {
+        [unroll] for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            int2 q = p + int2(dx, dy);
+            if (any(q < int2(0, 0)) || any(q > int2(319, 199))) continue;
+            uint n = refs.Load(int3(q, 0));
+            if (n == 0xFFFFFFFFu) continue;
+            float4 other = hd_part(n, f - float2(dx, dy));
+            if (other.a < 0.5) continue;
+            int o = order_of(n);
+            if (top < 0 || above(o, top)) {
+                top = o;
+                colour = other.rgb;
+            }
+        }
     }
-    return ai_shapes(uv);
+    return colour;
 }
 
 float3 to_linear(float3 c) { return pow(max(c, 0), 2.4); }
@@ -470,12 +503,12 @@ void Presenter::upload_hd(UINT frame) {
         }
         // Sprites are packed in rows ("shelves") with a gap of one original pixel between them.
         const UINT cw = UINT(p.width) + 1, ch = UINT(p.rows) + 1;
-        if (shelf_x_ + cw > kAtlasCells) {
-            shelf_x_ = 0;
+        if (shelf_x_ + cw > kAtlasCells - 1) {
+            shelf_x_ = 1;
             shelf_y_ += shelf_height_;
             shelf_height_ = 0;
         }
-        if (shelf_y_ + ch > kAtlasCells) {
+        if (shelf_y_ + ch > kAtlasCells - 1) {
             hd_->failed(p.slot);  // the atlas is full
             continue;
         }

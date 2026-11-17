@@ -232,6 +232,18 @@ class TerrainTests(unittest.TestCase):
         self.assertGreater(big[7 * k + 4, 20 * k, 0], 90)  # the soil keeps its colour
 
 
+class OutlineTests(unittest.TestCase):
+    def test_diagonal_stair_steps_become_a_smooth_outline(self):
+        alpha = np.zeros((8, 16), np.uint8)
+        for y in range(8):
+            alpha[y, :2 * y + 2] = 255  # the 2:1 stair steps of an isometric edge
+        big = terrain.smooth_alpha(alpha, 8).astype(np.float32) / 255
+        # Along each row, the edge should move evenly by two pixels per row instead of jumping in steps.
+        edges = [(big[r] > 0.5).sum() / 8 for r in range(8, 56)]
+        steps = np.diff(edges)
+        self.assertLess(np.abs(steps).max(), 0.6)
+
+
 class SpriteTests(unittest.TestCase):
     def test_picture_replaced_once_the_game_stops_reading_the_old_one(self):
         import threading
@@ -279,13 +291,13 @@ class SpriteTests(unittest.TestCase):
         self.assertEqual(filled[1, 3].tolist(), [100, 50, 0])
         self.assertTrue((filled[0, 1:3] > 0).all())
 
-    def test_upscaled_sprite_is_four_times_as_large_and_keeps_its_transparency(self):
+    def test_upscaled_sprite_is_four_times_as_large_and_keeps_its_transparency_and_single_dots(self):
         layers = [(np.zeros((48, 3, 3, 3), np.float32), np.zeros(48, np.float32), None)]
         rgba = np.zeros((5, 6, 4), np.uint8)
         rgba[2, 3] = (10, 20, 30, 255)
         big = upscale_sprites.upscale_sprite(lambda image: reference_upscale.upscale_image(layers, 4, image), rgba)
         self.assertEqual(big.shape, (20, 24, 4))
-        self.assertEqual(big[8:12, 12:16, 3].min(), 255)
+        self.assertEqual(big[9:11, 13:15, 3].min(), 255)  # a single dot keeps at least its middle
         self.assertEqual(big[:8, :, 3].max(), 0)
         self.assertEqual(big[9, 13, :3].tolist(), [10, 20, 30])
 

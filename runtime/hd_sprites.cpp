@@ -101,6 +101,9 @@ void HdSprites::draw(const Machine& m, uint32_t data, int width, int rows, uint3
         return rgba;
     });
     lock.unlock();
+    // Sprites drawn later lie on top. The count runs from 1 to 4095 and starts again; 0 marks pictures.
+    const uint16_t order = uint16_t(draw_count_ % 4095 + 1);
+    draw_count_++;
 
     for (int r = 0; r < rows; r++) {
         const uint32_t row = data + uint32_t(r) * stride;
@@ -108,7 +111,7 @@ void HdSprites::draw(const Machine& m, uint32_t data, int width, int rows, uint3
         for (int x = 0; x < width; x++) {
             const uint8_t c = nibble(m, row, x);
             if (!c) continue;
-            sprite_marks_[(line + uint32_t(x)) & 0xFFFFF] = {slot + 1, uint16_t(x), uint16_t(rows - 1 - r), uint8_t(base + c)};
+            sprite_marks_[(line + uint32_t(x)) & 0xFFFFF] = {slot + 1, uint16_t(x), uint16_t(rows - 1 - r), uint8_t(base + c), order};
         }
     }
 }
@@ -141,7 +144,7 @@ void HdSprites::take_over(const Machine& m, const Deferred& d) {
     for (int y = 0; y < d.rows; y++)
         for (int x = 0; x < d.width; x++)
             image_marks_[(d.dest + uint32_t(y) * d.dest_stride + uint32_t(x)) & 0xFFFFF] = {
-                slot + 1, uint16_t(x), uint16_t(y), d.pixels[size_t(y) * size_t(d.width) + size_t(x)]};
+                slot + 1, uint16_t(x), uint16_t(y), d.pixels[size_t(y) * size_t(d.width) + size_t(x)], 0};
 }
 
 void HdSprites::set_screen_source(uint32_t linear) { screen_source_ = linear; }
@@ -171,7 +174,7 @@ void HdSprites::frame(const Machine& m, uint32_t* refs) {
         if (!mark.slot || mark.slot > slots_.size() || colour != mark.colour) return kNone;
         const Slot& s = slots_[mark.slot - 1];
         if (s.state != State::placed) return kNone;
-        return ((s.atlas & 0xFFFF) + mark.x) | (((s.atlas >> 16) + mark.y) << 16);
+        return encode((s.atlas & 0xFFFF) + mark.x, (s.atlas >> 16) + mark.y, mark.order);
     };
     const uint32_t source = screen_source_;
     for (int i = 0; i < kPixels; i++) {

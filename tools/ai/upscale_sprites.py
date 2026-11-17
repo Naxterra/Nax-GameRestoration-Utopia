@@ -15,7 +15,8 @@ folder of this repository.
 
 The network has never seen what lies around a sprite, and a transparent pixel would read to it as black, which
 gives dark fringes. So before upscaling, every transparent pixel takes the colour of its nearest visible
-neighbours, and the sprite gets a border that repeats its edge. The transparency itself is enlarged as it is.
+neighbours, and the sprite gets a border that repeats its edge. The transparency gets a smooth outline instead
+of the pixel stair steps, which the AI filter uses to draw smooth sprite edges.
 """
 import argparse
 import glob
@@ -29,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import reference_upscale as reference  # noqa: E402
 import rrdb  # noqa: E402
+import terrain  # noqa: E402
 
 BORDER = 4
 
@@ -95,7 +97,7 @@ def upscale_sprite(model, rgba, scale=4):
     padded = np.pad(rgb, ((BORDER, BORDER), (BORDER, BORDER), (0, 0)), mode="edge")
     big = model(np.clip(padded + 0.5, 0, 255).astype(np.uint8))
     big = big[BORDER * scale:-BORDER * scale, BORDER * scale:-BORDER * scale]
-    alpha = np.repeat(np.repeat(rgba[:, :, 3], scale, axis=0), scale, axis=1)
+    alpha = terrain.smooth_alpha(rgba[:, :, 3], scale)
     return np.concatenate([big, alpha[:, :, None]], axis=2)
 
 

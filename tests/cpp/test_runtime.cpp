@@ -263,7 +263,7 @@ const std::vector<Test> kTests = {
          std::vector<uint32_t> refs(64000);
          hd.frame(m, refs.data());
          const uint32_t at = 10 * 320 + 5;
-         return hd.sprite_count() == 1 && refs[at] == (100u | (201u << 16)) && refs[at + 1] == (101u | (201u << 16)) &&
+         return hd.sprite_count() == 1 && refs[at] == nax::HdSprites::encode(100, 201, 1) && refs[at + 1] == nax::HdSprites::encode(101, 201, 1) &&
                 refs[at + 2] == nax::HdSprites::kNone;
      }},
     {"sprite_pixel_drawn_over_or_without_upscaled_picture_keeps_the_original", [] {
@@ -296,10 +296,10 @@ const std::vector<Test> kTests = {
          const uint32_t at = 10 * 320 + 5;
          m.mem[0xA0000 + at] = 0x41;  // the sprite on screen
          hd.frame(m, refs.data());
-         const bool sprite = refs[at] == (400u | (1u << 16));
+         const bool sprite = refs[at] == nax::HdSprites::encode(400, 1, 1);
          m.mem[0xA0000 + at] = 0x07;  // the game restored the picture
          hd.frame(m, refs.data());
-         return waited && sprite && refs[at] == (5u | (10u << 16));
+         return waited && sprite && refs[at] == nax::HdSprites::encode(5, 10, 0);
      }},
     {"sprite_drawn_twice_is_saved_once_with_transparency", [] {
          Fixture f;

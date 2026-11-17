@@ -77,7 +77,8 @@ private:
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> atlas_uploads_[kFrames];  // kept until the frame has run
     bool atlas_readable_ = false;
     bool atlas_failed_ = false;
-    UINT shelf_x_ = 0, shelf_y_ = 0, shelf_height_ = 0;
+    // Packing starts one cell in, so every sprite has an empty cell before it as well as after it.
+    UINT shelf_x_ = 1, shelf_y_ = 1, shelf_height_ = 0;
 };
 
 }  // namespace nax

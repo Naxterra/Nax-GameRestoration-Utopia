@@ -69,6 +69,18 @@ class GroundTexture:
                 layer[y1, x0] * (1 - fx) * fy + layer[y1, x1] * fx * fy)
 
 
+def smooth_alpha(alpha, factor):
+    """Enlarges a transparency mask with a smooth outline instead of the pixel stair steps: the mask is enlarged
+    smoothly, softened a little and cut at the middle, with a short soft edge for anti-aliasing."""
+    a = alpha.astype(np.float32) / 255
+    big = gaussian_blur(enlarge(a, factor), factor * 0.6)
+    edge = np.clip((big - 0.5) / 0.12 + 0.5, 0, 1)
+    # The middle of every visible pixel stays visible, so single dots and thin lines never disappear.
+    centre = np.abs((np.arange(factor) + 0.5) / factor - 0.5) < 0.3
+    core = np.repeat(np.repeat(a, factor, axis=0), factor, axis=1) * np.tile(centre[:, None] & centre[None, :], a.shape)
+    return (np.maximum(edge, core) * 255 + 0.5).astype(np.uint8)
+
+
 def shift(a, dy, dx):
     """The array moved by dy rows and dx columns, with zeros where nothing moved in."""
     out = np.zeros_like(a)
@@ -118,5 +130,5 @@ def ground_tile(rgba, texture, amount=0.8, rocks=0.8):
     colour = texture.sample(texture.colour, u, v)
     out = base * (1 + amount * 0.25 * detail)[..., None] * (1 + amount * 0.5 * (colour - 1))
     out = out * (1 - rocks * rock * (0.85 + 0.15 * np.clip(detail, -1, 1)))[..., None]
-    alpha = np.repeat(np.repeat(rgba[:, :, 3], SCALE, axis=0), SCALE, axis=1)
+    alpha = smooth_alpha(rgba[:, :, 3], SCALE)
     return np.concatenate([(np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8), alpha[:, :, None]], axis=2)

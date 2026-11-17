@@ -49,8 +49,12 @@ public:
     // address. Each screen pixel is then looked up at the same place in that buffer.
     void set_screen_source(uint32_t linear);
 
-    // Called for each frame: for each of the 320x200 screen pixels, the atlas cell (x in the low 16 bits, y in
-    // the high 16 bits, in original pixels) whose upscaled picture belongs there, or kNone.
+    // Called for each frame: for each of the 320x200 screen pixels, the atlas cell whose upscaled picture
+    // belongs there, or kNone. A reference holds the cell's x in bits 0 to 9 and its y in bits 10 to 19 (in
+    // original pixels; the atlas is 1024 cells wide and high), and in bits 20 to 31 the order in which sprites
+    // were drawn: 0 for a picture underneath everything, then 1 to 4095 counting up and starting again, so the
+    // presenter can tell which of two neighbouring sprites lies on top where their smooth outlines meet.
+    static uint32_t encode(uint32_t x, uint32_t y, uint32_t order) { return (x & 0x3FF) | ((y & 0x3FF) << 10) | (order << 20); }
     void frame(const Machine& m, uint32_t* refs);
 
     // Upscaled pictures that exist on disk but are not in the atlas yet. The presenter loads each one and
@@ -71,6 +75,7 @@ private:
         uint32_t slot = 0;  // 1 + the sprite's slot, or 0 for no sprite
         uint16_t x = 0, y = 0;
         uint8_t colour = 0;  // the colour the sprite put there, to notice when something else was drawn over it
+        uint16_t order = 0;  // see encode()
     };
     enum class State : uint8_t { missing, pending, placed, failed };
     struct Slot {
@@ -93,6 +98,7 @@ private:
 
     std::vector<Mark> sprite_marks_, image_marks_;  // one of each per byte of memory
     std::atomic<uint32_t> screen_source_{0};
+    uint32_t draw_count_ = 0;  // only used on the game thread
     std::mutex mutex_;
     std::vector<Slot> slots_;
     std::unordered_map<uint64_t, uint32_t> by_key_;

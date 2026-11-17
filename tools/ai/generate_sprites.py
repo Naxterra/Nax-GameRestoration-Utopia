@@ -112,7 +112,7 @@ def redraw(pipe, esrgan, rgba, args, generator):
         merged = detailed - broad(detailed.astype(np.uint8), radius) + broad(reference, radius)
         reference = np.clip(merged + 0.5, 0, 255).astype(np.uint8)
     cut = reference[BORDER * SCALE:-BORDER * SCALE, BORDER * SCALE:-BORDER * SCALE]
-    alpha = np.repeat(np.repeat(rgba[:, :, 3], SCALE, axis=0), SCALE, axis=1)
+    alpha = terrain.smooth_alpha(rgba[:, :, 3], SCALE)
     return np.concatenate([cut, alpha[:, :, None]], axis=2)
 
 

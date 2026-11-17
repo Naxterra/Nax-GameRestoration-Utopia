@@ -28,9 +28,11 @@ class Machine;
 // Decides whether a full texture atlas is emptied to make room. Emptying helps when the screen has moved on
 // to other pictures, but not when the pictures on screen alone fill the atlas: then each emptying would only
 // make every upscaled picture flicker back to its original pixels while the same set is loaded again. So the
-// atlas is only emptied when the pictures on screen need at most half of it, at most once every 10 seconds,
-// and after an emptying that did not help (the atlas was full again within those 10 seconds), not again for a
-// screen that needs as much, until a minute has passed without the atlas running full.
+// atlas is only emptied when the pictures on screen need at most half of it, and at most once every 10
+// seconds. If it runs full again within those 10 seconds while the screen needs about as much as it did at
+// the emptying, the emptying did not help, and screens that need that much are not emptied for again during
+// the next minute. A screen that needs much less or much more counts as a different screen and is not held
+// back by this.
 class AtlasClearing {
 public:
     explicit AtlasClearing(uint64_t capacity) : capacity_(capacity) {}
@@ -40,8 +42,9 @@ public:
 
 private:
     uint64_t capacity_;
-    int64_t cleared_at_ = INT64_MIN / 2, last_overflow_ = INT64_MIN / 2;
-    uint64_t limit_ = UINT64_MAX;
+    int64_t cleared_at_ = INT64_MIN / 2, limit_set_at_ = INT64_MIN / 2;
+    uint64_t cleared_for_ = 0;      // what the screen needed when the atlas was last emptied
+    uint64_t limit_ = UINT64_MAX;  // screens needing this much or more are not emptied for
 };
 
 class HdSprites {

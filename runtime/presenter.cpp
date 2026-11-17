@@ -513,7 +513,6 @@ void Presenter::upload_hd(UINT frame) {
         }
         const size_t bytes = size_t(p.width) * k * size_t(p.rows) * k * 4;
         if (bytes > budget && budget != (size_t(16) << 20)) break;
-        budget -= std::min(budget, bytes);
         UINT w = 0, h = 0;
         std::vector<uint8_t> rgba;
         if (!load_picture(p.file, &w, &h, &rgba)) {
@@ -530,6 +529,7 @@ void Presenter::upload_hd(UINT frame) {
             hd_->failed(p.slot);
             continue;
         }
+        budget -= std::min(budget, bytes);  // only pictures that will be uploaded count
 
         const UINT pitch = (w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
         D3D12_HEAP_PROPERTIES uh{};

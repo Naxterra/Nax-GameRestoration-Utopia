@@ -378,11 +378,18 @@ const std::vector<Test> kTests = {
          nax::AtlasClearing clearing(1000);
          return !clearing.overflow(0, 501) && clearing.overflow(1, 500);
      }},
-    {"full_atlas_is_emptied_again_after_a_minute_without_running_full", [] {
+    {"full_atlas_is_emptied_again_a_minute_after_emptying_did_not_help_although_it_kept_running_full", [] {
          nax::AtlasClearing clearing(1000);
          const bool first = clearing.overflow(0, 400);
-         const bool soon = clearing.overflow(5000, 400);
-         return first && !soon && clearing.overflow(70000, 400);
+         bool held = true;
+         for (int64_t t = 5000; t <= 64000; t += 1000) held = held && !clearing.overflow(t, 400);  // every frame
+         return first && held && clearing.overflow(66000, 400);
+     }},
+    {"screen_that_changes_soon_after_emptying_is_not_held_back_by_it", [] {
+         nax::AtlasClearing clearing(1000);
+         const bool first = clearing.overflow(0, 400);
+         const bool soon = clearing.overflow(5000, 100);  // another screen that needs much less
+         return first && !soon && clearing.overflow(11000, 100);
      }},
     {"room_needed_on_screen_counts_each_shown_sprite_once_with_its_gap", [] {
          nax::Machine m;

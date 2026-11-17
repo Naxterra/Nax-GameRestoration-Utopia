@@ -265,15 +265,21 @@ uint64_t HdSprites::on_screen_cells() {
 }
 
 bool AtlasClearing::overflow(int64_t now_ms, uint64_t on_screen) {
-    if (now_ms - last_overflow_ > 60000) limit_ = UINT64_MAX;
-    last_overflow_ = now_ms;
+    // The limit runs out a minute after it was set. Overflows in between, which come every frame while a
+    // picture waits for room, do not extend it.
+    if (limit_ != UINT64_MAX && now_ms - limit_set_at_ > 60000) limit_ = UINT64_MAX;
     if (now_ms - cleared_at_ < 10000) {
-        // The last emptying did not help: a screen that needs as much is not emptied for again.
-        limit_ = std::min(limit_, on_screen * 3 / 4);
+        // Full again soon after emptying. If the screen still needs about as much as then, emptying did not help.
+        const bool same_screen = on_screen * 4 >= cleared_for_ * 3 && on_screen * 4 <= cleared_for_ * 5;
+        if (same_screen && limit_ == UINT64_MAX) {
+            limit_ = cleared_for_ * 3 / 4;
+            limit_set_at_ = now_ms;
+        }
         return false;
     }
     if (on_screen > capacity_ / 2 || on_screen >= limit_) return false;
     cleared_at_ = now_ms;
+    cleared_for_ = on_screen;
     return true;
 }
 

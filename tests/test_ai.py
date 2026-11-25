@@ -222,6 +222,15 @@ class TerrainTests(unittest.TestCase):
         tall[:, :, 3] = 255
         self.assertFalse(terrain.is_ground(tall))
 
+    def test_pale_ice_ground_counts_as_ground_while_solid_yellow_cursor_does_not(self):
+        ice = self.tile()
+        ice[ice[:, :, 3] > 0, :3] = (160, 163, 247)
+        ice[7, 10:12, :3] = (60, 62, 100)
+        self.assertTrue(terrain.is_ground(ice))
+        cursor = self.tile()
+        cursor[cursor[:, :, 3] > 0, :3] = (255, 255, 0)
+        self.assertFalse(terrain.is_ground(cursor))
+
     def test_ground_tile_keeps_size_transparency_and_dark_rocks(self):
         texture = terrain.GroundTexture(np.full((32, 32, 3), 128, np.uint8))
         big = terrain.ground_tile(self.tile(), texture)

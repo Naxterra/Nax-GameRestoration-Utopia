@@ -32,7 +32,11 @@ The script translates the original program files into `generated\utopia` and com
 
 ## Playing
 
-Start `build\utopia\Utopia.exe`. While the window is active, the mouse controls the game and the Windows pointer stays inside the window; Alt+Tab releases it. Alt+Enter switches between a window and borderless fullscreen. F11 switches between four picture filters: sharp pixels, smooth edges (stair steps along diagonal and round edges are redrawn as smooth lines), a CRT look with scanlines, and AI upscaling; the choice is remembered for the next start. The AI filter draws the game's map sprites (terrain, buildings and other objects) from AI-upscaled pictures at the full screen resolution, as described in the next section. Everything else is redrawn at four times the size by the realesr-animevideov3 network from the Real-ESRGAN project, which runs as Direct3D 12 compute shaders on the graphics card, and every screen pixel then takes the closest of the game's own colours, so outlines, icons and letters keep hard edges. F12 saves a screenshot exactly as the picture appears on screen.
+Start `build\utopia\Utopia.exe`. In windowed mode, clicking inside the picture activates mouse control, and `Right Ctrl`, middle click, `Alt+Tab`, `Alt+Space`, or `Alt+F4` release the pointer cleanly. `Alt+Enter` switches between a window and borderless fullscreen.
+
+`F9` switches between the **Expanded View** (the default in AI upscaling mode on widescreen and ultrawide monitors) and the classic centered 4:3 view; the choice is remembered in `settings.ini`. Expanded View renders Utopia's full 75x100 isometric colony map directly at native monitor resolution with smooth mouse-wheel zoom, panning via `WASD`, arrow keys, middle-drag, or right-drag, and click-anywhere building interaction. Docked HD HUD strips float cleanly over the terrain, the empty bottom message console hides automatically until Utopia prints a message, and in-game dialogs such as `SELECT A BUILDING..`, building info, Trade/Finance, and Intelligence Reports float over the dimmed colony map while full-screen sub-screens (Options, Advisors, Planetary Radar/Map) render at crisp 4:3 aspect ratio.
+
+`F11` switches between four picture filters: sharp pixels, smooth edges (stair steps along diagonal and round edges are redrawn as smooth lines), a CRT look with scanlines, and AI upscaling; the choice is remembered for the next start. The AI filter draws remastered sprites, buildings, terrain tiles, and screens from high-resolution pictures with smooth alpha compositing and ambient nighttime dimming, while keeping bitmap fonts, cursors, and un-remastered details razor-sharp with sharp-bilinear scaling. `F12` saves a screenshot exactly as the picture appears on screen.
 
 ## AI-upscaled sprites
 
@@ -76,6 +80,8 @@ Utopia does not play music on its own. On the options screen, click the disk but
 | `--language en`, `fr`, `de` or `it` | The language of the game's texts. |
 | `--skip-intro` | Starts the game without the intro. |
 | `--filter sharp`, `smooth`, `crt` or `ai` | The picture filter for this start, instead of the one last chosen with F11. |
+| `--view expanded` or `classic` | Selects Expanded ultrawide view or classic 4:3 view for this start, instead of the one last chosen with F9. |
+| `--window WxH` | Sets the initial window client size in pixels (for example `2560x1080`). |
 | `--data <folder>` | Uses the game files in another folder. |
 | `--no-redraw` | Does not redraw new sprites in the background. |
 

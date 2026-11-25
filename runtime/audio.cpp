@@ -93,7 +93,7 @@ bool Audio::start(std::string* error) {
         std::vector<std::vector<int16_t>> buffers(kBuffersQueued + 1, std::vector<int16_t>(kBufferSamples));
         std::vector<float> samples(kBufferSamples);
         size_t next = 0;
-        FILE* wav = record_path_.empty() ? nullptr : _wfopen(record_path_.c_str(), L"wb");
+        FILE* wav = record_path_.empty() ? nullptr : _wfopen(record_path_.c_str(), L"wbN");
         uint32_t recorded = 0;
         auto header = [&] {
             const uint32_t bytes = recorded * 2;

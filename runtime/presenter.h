@@ -10,11 +10,13 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "ai_upscaler.h"
 #include "hd_sprites.h"
+#include "world_view.h"
 
 namespace nax {
 
@@ -35,17 +37,25 @@ public:
     // The AI filter draws the upscaled pictures that this tracker knows of in place of the game's sprites.
     void set_hd(HdSprites* hd) { hd_ = hd; }
     // Draws one frame with the given filter; with a capture path it also saves the frame as a PNG file.
-    // hd_refs holds, for every pixel, the atlas cell of its upscaled picture or HdSprites::kNone.
-    void draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, const std::filesystem::path* capture = nullptr);
+    // hd_refs holds, for every pixel, the atlas cell of its upscaled picture or HdSprites::kNone. When
+    // `refresh_refs` is supplied and new HD pictures were just uploaded into the atlas, it is called once
+    // before the frame is drawn so those pictures appear immediately on the very same frame without pop-in.
+    // When `world` is non-null in AI filter mode, draws the expanded native-resolution colony viewport and docked HUD.
+    void draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, const std::filesystem::path* capture = nullptr,
+              const std::function<void()>& refresh_refs = {}, const WorldRenderData* world = nullptr);
     // The rectangle inside the client area that shows the game picture, for mapping mouse positions.
     RECT picture_rect() const;
+    UINT width() const { return width_; }
+    UINT height() const { return height_; }
 
 private:
     static constexpr UINT kFrames = 2;
     static constexpr UINT kAtlasCells = 1024;  // the atlas holds 1024x1024 original pixels, each as 8x8 texels
+    static constexpr UINT kMaxWorldVerts = 65536;
     void wait_idle();
-    void upload_hd(UINT frame);
+    bool upload_hd(UINT frame);
     bool create_atlas();
+    bool ensure_fallback_texture();
     void create_targets();
 
     HWND hwnd_ = nullptr;
@@ -64,10 +74,19 @@ private:
     HANDLE fence_event_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> root_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> pso_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> world_pso_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> world_vb_[kFrames];
+    uint8_t* world_vb_ptr_[kFrames]{};
     Microsoft::WRL::ComPtr<ID3D12Resource> texture_;
     Microsoft::WRL::ComPtr<ID3D12Resource> upload_[kFrames];
     uint8_t* upload_ptr_[kFrames]{};
     bool texture_readable_ = false;
+    Microsoft::WRL::ComPtr<ID3D12Resource> fallback_tex_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> fallback_upload_[kFrames];
+    uint8_t* fallback_upload_ptr_[kFrames]{};
+    bool fallback_readable_ = false;
+    bool fallback_failed_ = false;
+    uint64_t uploaded_fallback_version_ = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> readback_;
     UINT64 readback_size_ = 0;
     AiUpscaler ai_;

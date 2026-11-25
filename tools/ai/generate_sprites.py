@@ -139,7 +139,7 @@ def main():
         sys.exit("PyTorch cannot reach the graphics card.")
     root = os.path.join(BASE, args.game, "hd")
     originals = sorted(p for prefix in (args.only or "").split(",")
-                       for p in glob.glob(os.path.join(root, "original", prefix + "*.png")))
+                       for p in glob.glob(os.path.join(glob.escape(root), "original", prefix + "*.png")))
     if not originals:
         sys.exit(f"No saved sprites in {os.path.join(root, 'original')}. Play the game for a while first.")
     out_dir = args.out or os.path.join(root, "upscaled")

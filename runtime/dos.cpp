@@ -252,8 +252,7 @@ void Machine::int21() {
         std::string dir = read_string(c.ds, c.d.x);
         if (dir.size() >= 2 && dir[1] == ':') dir = dir.substr(2);
         std::replace(dir.begin(), dir.end(), '\\', '/');
-        if (!dir.empty() && dir[0] == '/') cwd_.clear();
-        std::string next = cwd_;
+        std::string next = (!dir.empty() && dir[0] == '/') ? std::string() : cwd_;
         size_t start = 0;
         while (start <= dir.size()) {
             const size_t end = dir.find('/', start);
@@ -291,7 +290,7 @@ void Machine::int21() {
         file.name = name;
         if (mode == 0) {
             if (!resolve(name, false, &path)) { log("Open %s: not found", name.c_str()); dos_error(2); return; }
-            file.f = _wfopen(path.c_str(), L"rb");
+            file.f = _wfopen(path.c_str(), L"rbN");
         } else {
             std::filesystem::path existing;
             const bool had = !create && resolve(name, false, &existing);
@@ -301,14 +300,27 @@ void Machine::int21() {
             file.temp_path = file.final_path;
             file.temp_path += L".nax-tmp" + std::to_wstring(handle);
             std::error_code ec;
-            if (had && !std::filesystem::copy_file(existing, file.temp_path, std::filesystem::copy_options::overwrite_existing, ec)) {
-                log("Open %s for writing: could not copy the current version", name.c_str());
-                dos_error(5);
-                return;
+            if (had) {
+                if (!std::filesystem::copy_file(existing, file.temp_path, std::filesystem::copy_options::overwrite_existing, ec)) {
+                    log("Open %s for writing: could not copy the current version", name.c_str());
+                    dos_error(5);
+                    return;
+                }
+                const DWORD attrs = GetFileAttributesW(file.temp_path.c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                    SetFileAttributesW(file.temp_path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
             }
-            file.f = _wfopen(file.temp_path.c_str(), had ? L"r+b" : L"w+b");
+            file.f = _wfopen(file.temp_path.c_str(), had ? L"r+bN" : L"w+bN");
         }
-        if (!file.f) { log("Open %s: failed", name.c_str()); dos_error(5); return; }
+        if (!file.f) {
+            if (!file.temp_path.empty()) {
+                std::error_code rm_ec;
+                std::filesystem::remove(file.temp_path, rm_ec);
+            }
+            log("Open %s: failed", name.c_str());
+            dos_error(5);
+            return;
+        }
         log("%s %s as handle %d", create ? "Created" : (mode == 0 ? "Opened" : "Opened for writing"), name.c_str(), handle);
         files_[handle] = std::move(file);
         c.a.x = uint16_t(handle);
@@ -445,19 +457,23 @@ void Machine::int21() {
                     for (wchar_t ch : wide) n += char(ch);
                     std::error_code type_ec;
                     if (!entry.is_regular_file(type_ec) || n.find(".nax-tmp") != std::string::npos) continue;
-                    if (wildcard_match(mask, n) && std::find(find_results_.begin(), find_results_.end(), lower(n)) == find_results_.end())
-                        find_results_.push_back(lower(n));
+                    const std::string key = lower(n);
+                    const bool seen = std::any_of(find_results_.begin(), find_results_.end(),
+                                                  [&](const auto& item) { return item.first == key; });
+                    if (wildcard_match(mask, n) && !seen) {
+                        std::error_code sz_ec;
+                        const uintmax_t fsize = std::filesystem::file_size(entry.path(), sz_ec);
+                        find_results_.push_back({key, sz_ec ? 0 : fsize});
+                    }
                 }
             }
-            std::sort(find_results_.begin(), find_results_.end());
+            std::sort(find_results_.begin(), find_results_.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
             log("Search %s: %zu matches", pattern.c_str(), find_results_.size());
         }
         if (find_next_ >= find_results_.size()) { dos_error(18); return; }
-        std::filesystem::path path;
-        const std::string name = find_results_[find_next_++];
-        std::error_code ec;
-        const uintmax_t size = resolve(name, false, &path) ? std::filesystem::file_size(path, ec) : 0;
-        find_entry(name, size);
+        const auto& found = find_results_[find_next_++];
+        find_entry(found.first, found.second);
         return;
     }
     default:

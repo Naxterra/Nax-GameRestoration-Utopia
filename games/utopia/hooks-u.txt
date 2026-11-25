@@ -4,6 +4,29 @@
 0ffe:220a utopia_sprite_rows_in_cx
 0ffe:2b10 utopia_sprite_rows_in_cx_es_in_ax
 0ffe:3364 utopia_sprite_rows_in_bp
-# The routine that unpacks the screen pictures: where it starts and where it returns.
+# Dynamic 32-pixel 4-bit sprites (units, aliens, and effects), drawn either top-down or bottom-up into ES:DI.
+0ffe:f040 utopia_sprite_dynamic
+# 16x16 top-down 4-bit button icons from buttons.vgg drawn to the picture buffer (base 0) or directly to VRAM (base 0x10).
+0ffe:76fd utopia_button_buffer
+0ffe:7641 utopia_button_vram
+# Full-frame copies from the picture buffer (0x5872) to VGA video memory (0xA000): begin before rep movsw, commit after.
+0ffe:0a60 utopia_begin_present
+0ffe:0a73 utopia_present_buffer
+0ffe:7e56 utopia_begin_present
+0ffe:7e69 utopia_present_buffer
+# Popup/panel background fill routines (buffer dither strips, 8x8 VRAM dialog tiles), planetary map, and backdrop restore.
+0ffe:7417 utopia_panel_fill_8_buffer
+0ffe:743c utopia_panel_fill_8_buffer_cell
+0ffe:7394 utopia_vram_text_clear_8x8
+0ffe:7c28 utopia_vram_text_clear_8x6
+0ffe:92e0 utopia_vram_cell_8x8
+0ffe:9371 utopia_vram_cell_8x8
+0ffe:9487 utopia_vram_cell_8x8
+0ffe:adfc utopia_vram_cell_8x8_unshifted
+0ffe:96b2 utopia_vram_planet_map
+0ffe:09d5 utopia_restore_map_backdrop
+# The routine that unpacks the screen pictures (both to the picture buffer and directly to VRAM): where it starts and where it returns.
 0ffe:0aec utopia_unpack_start
 0ffe:0ba1 utopia_unpack_end
+# Right after INT 33h fn 0Bh updates ds:[0x6590]/[0x6592], to apply queued expanded-view cursor/camera updates safely on the game thread.
+0ffe:1085 utopia_after_mouse_poll

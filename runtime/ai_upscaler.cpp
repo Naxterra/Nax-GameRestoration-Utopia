@@ -115,7 +115,7 @@ ComPtr<ID3D12Resource> buffer(ID3D12Device* device, D3D12_HEAP_TYPE type, UINT64
 bool AiUpscaler::init(ID3D12Device* device, UINT64 timestamp_frequency, const std::filesystem::path& path, std::string* error) {
     device_ = device;
     timestamp_frequency_ = timestamp_frequency;
-    FILE* f = _wfopen(path.c_str(), L"rb");
+    FILE* f = _wfopen(path.c_str(), L"rbN");
     if (!f) { *error = "The AI model file was not found."; return false; }
     std::vector<uint8_t> raw;
     uint8_t chunk[65536];

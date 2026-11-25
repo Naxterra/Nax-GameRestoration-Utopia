@@ -72,7 +72,7 @@ void Machine::set_folders(const std::filesystem::path& data, const std::filesyst
     save_dir_ = saves;
     std::error_code ec;
     std::filesystem::create_directories(save_dir_, ec);
-    log_ = _wfopen((save_dir_ / L"runtime.log").c_str(), L"w");
+    log_ = _wfopen((save_dir_ / L"runtime.log").c_str(), L"wN");
     std::filesystem::recursive_directory_iterator it(save_dir_ / L"files", ec), end;
     for (; !ec && it != end; it.increment(ec)) {
         if (it->path().filename().wstring().find(L".nax-tmp") == std::wstring::npos) continue;
@@ -171,7 +171,7 @@ bool Machine::load_executable(const ModuleInfo* program, const std::string& tail
         fatal(std::string("The game file ") + program->source + " was not found in the game folder.");
         return false;
     }
-    FILE* f = _wfopen(path.c_str(), L"rb");
+    FILE* f = _wfopen(path.c_str(), L"rbN");
     if (!f) { fatal(std::string("Cannot open ") + program->source); return false; }
     std::vector<uint8_t> raw;
     uint8_t chunk[65536];

@@ -213,7 +213,7 @@ private:
     std::filesystem::path data_dir_, save_dir_;
     std::string cwd_;  // current DOS directory relative to the game folder, with forward slashes
     uint16_t dta_seg_ = 0, dta_off_ = 0x80;
-    std::vector<std::string> find_results_;
+    std::vector<std::pair<std::string, uintmax_t>> find_results_;
     size_t find_next_ = 0;
     std::atomic<bool> stop_requested_{false};
     bool running_ = false;

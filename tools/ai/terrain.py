@@ -90,15 +90,25 @@ def shift(a, dy, dx):
 
 
 def is_ground(rgba):
-    """A flat ground tile: 32 pixels wide, at most 16 high, filling about the diamond, without bright markings."""
+    """A flat ground tile: 32 pixels wide, at most 16 high, filling about the diamond, without bright painted markings.
+
+    Dark planets (Mars, green, dark crystal) have low peak luminance. Bright icy or snowy ground tiles have
+    higher luminance across the whole tile with low saturation and no sharp high-chroma painted markings.
+    """
     h, w = rgba.shape[:2]
     if w != 32 or h > 16 or h < 12:
         return False
     visible = rgba[:, :, 3] > 127
     if visible.sum() < 0.45 * w * h:
         return False
-    lum = rgba[:, :, :3].astype(np.float32).mean(axis=2) / 255
-    return bool(lum[visible].max() <= 0.5)
+    rgb = rgba[:, :, :3][visible].astype(np.float32) / 255
+    lum = rgb.mean(axis=1)
+    if lum.max() <= 0.5:
+        return True
+    chroma = rgb.max(axis=1) - rgb.min(axis=1)
+    # Bright painted markings (such as yellow landing-pad stripes or solid cursor highlights) have high chroma
+    # (> 0.50) or jump sharply above the tile's median luminance; uniform pale snow or ice does neither.
+    return bool(chroma.max() <= 0.50 and (lum.max() - float(np.median(lum))) <= 0.25)
 
 
 def ground_tile(rgba, texture, amount=0.8, rocks=0.8):

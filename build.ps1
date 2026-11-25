@@ -4,7 +4,7 @@ Translates a game from the user's own copy and builds the native Windows program
 
 .DESCRIPTION
 The script runs the translator on the original program files in the given game folder, writes the C++ modules to
-generated\<game>, and compiles them together with the runtime into build\<game>.exe. Both folders stay local,
+generated\<game>, and compiles them together with the runtime into build\<game>\Utopia.exe. Both folders stay local,
 because their content is derived from the original game.
 
 .EXAMPLE
@@ -104,7 +104,9 @@ $flags = @("/nologo", "/std:c++20", "/EHsc", "/MT", "/W3", "/wd4102", "/MP", "/b
     "/DNOMINMAX", "/D_CRT_SECURE_NO_WARNINGS", "/DWIN32_LEAN_AND_MEAN", "/DUNICODE", "/D_UNICODE", "/I$root", "/Fo$($objects -replace '\\', '/')/", "/Fe$(Join-Path $build $spec.exe)") + $optimize
 & cl.exe @flags @sources /link /SUBSYSTEM:WINDOWS d3d12.lib dxgi.lib d3dcompiler.lib windowscodecs.lib user32.lib shell32.lib ole32.lib xaudio2.lib
 if ($LASTEXITCODE -ne 0) { throw "Compiling failed." }
-# The AI filter's model goes next to the program.
+# The AI filter's model and license notices go next to the program.
 New-Item -ItemType Directory -Force (Join-Path $build "models") | Out-Null
 Copy-Item (Join-Path $root "models\*") (Join-Path $build "models") -Force
+Copy-Item (Join-Path $root "LICENSE") $build -Force
+Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.txt") $build -Force
 Write-Host "Built $(Join-Path $build $spec.exe)"

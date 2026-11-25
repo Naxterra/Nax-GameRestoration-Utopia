@@ -125,7 +125,7 @@ def main():
     model_path = args.model or os.path.join(base, "models", "RealESRGAN_x4plus.pth")
     if not args.model and not os.path.exists(model_path):
         model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "models", "realesr-animevideov3.bin")
-    originals = sorted(glob.glob(os.path.join(root, "original", "*.png")))
+    originals = sorted(glob.glob(os.path.join(glob.escape(root), "original", "*.png")))
     if not originals:
         sys.exit(f"No saved sprites in {os.path.join(root, 'original')}. Play the game for a while first.")
     os.makedirs(os.path.join(root, "upscaled"), exist_ok=True)

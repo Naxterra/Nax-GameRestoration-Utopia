@@ -10,6 +10,7 @@
 // differ from those colours, for example while the game fades the screen, its original pixels are shown.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <bitset>
 #include <chrono>
@@ -97,8 +98,9 @@ private:
 
 class HdSprites {
 public:
-    static constexpr int kScale = 8;                 // the atlas holds pictures eight times as large (four is doubled)
-    static constexpr uint32_t kNone = 0xFFFFFFFFu;  // a screen pixel without a high-resolution picture
+    static constexpr int kScale = 8;                    // the atlas holds pictures eight times as large (four is doubled)
+    static constexpr uint32_t kNone = 0xFFFFFFFFu;      // a screen pixel without a high-resolution picture
+    static constexpr uint32_t kPopupHole = 0xFFFFFFFEu; // unmasked background gap inside an L-shaped popup bounding box
 
     HdSprites();
 
@@ -106,11 +108,13 @@ public:
     void set_folder(const std::filesystem::path& folder);
 
     // Called on the game thread when the game draws a sprite of 4-bit pixels, two per byte with the left pixel
-    // in the high half. The sprite is `width` pixels wide and `rows` high, stored from the bottom row up, and
-    // is drawn upward from linear address `dest` (the bottom row's first pixel) with a line length of 320.
-    // Colour 0 is transparent, and every other colour is drawn as `base` plus the colour. While the colours it
-    // uses are changing (a fade), the sprite is not recorded, so no picture is saved for a passing shade.
-    void draw(const Machine& m, uint32_t data, int width, int rows, uint32_t dest, uint8_t base);
+    // in the high half. The sprite is `width` pixels wide and `rows` high. When `bottom_up` is true, rows are
+    // stored from the bottom row up and drawn upward from linear address `dest`; when false, rows are stored top
+    // row first and drawn downward from `dest` (line length 320). Colour 0 is transparent, and every other colour
+    // is drawn as `base` plus the colour. While the colours it uses are changing (a fade), the sprite is not
+    // recorded, so no picture is saved for a passing shade.
+    void draw(const Machine& m, uint32_t data, int width, int rows, uint32_t dest, uint8_t base, bool bottom_up = true,
+              bool track_neighbours = true);
 
     // Called on the game thread when the game has put a whole picture of 8-bit pixels (a background or a panel)
     // at linear address `data`, `width` pixels per row with `stride` bytes between rows, top row first, which
@@ -123,14 +127,52 @@ public:
     // For games that draw into a 320x200 buffer and copy it to the screen as a whole: the buffer's linear
     // address. Each screen pixel is then looked up at the same place in that buffer.
     void set_screen_source(uint32_t linear);
+    uint32_t screen_source() const { return screen_source_.load(std::memory_order_acquire); }
+
+    // Called on the game thread right before the game starts copying its 320x200 offscreen buffer to video
+    // memory (0xA0000), freezing a coherent copy of live video memory so the render thread never sees a torn
+    // mid-copy frame while `rep movsw` runs.
+    void begin_present(const Machine& m);
+
+    // Called when the game has finished copying its 320x200 offscreen buffer to video memory (0xA0000).
+    // Snapshots the buffer's sprite and backdrop marks into a double-buffered front copy so subsequent
+    // offscreen redraws for the next frame never race against the displayed VRAM frame.
+    void present_buffer(uint32_t linear);
+
+    // Called when the game fills a rectangular UI box or panel (line length 320) over existing sprites and
+    // backdrop, so covered sprites and backdrop pixels cannot accidentally bleed through on colour collisions.
+    void clear_rect(uint32_t dest, int width, int rows);
+
+    // Called when the game restores a previously saved copy of its map/backdrop over a rectangle (line length
+    // 320), unmasking the covered sprite and backdrop marks so their HD pictures show again.
+    void restore_rect(uint32_t dest, int width, int rows);
+
+    // Called when the game overwrites a rectangular map region in its offscreen buffer with a clean saved
+    // backdrop before drawing the next frame's tiles, clearing stale sprite marks while keeping backdrop marks.
+    void restore_backdrop_rect(uint32_t dest, int width, int rows);
+
+    // Called after the game clears a text area with its stippled background tile, updating the active HD
+    // backdrop's expected pixel colours to the newly written clear pattern so cleared areas stay seamless while
+    // text drawn afterwards still renders on top.
+    void sync_image_rect(const Machine& m, uint32_t dest, int width, int rows);
 
     // Called for each frame: for each of the 320x200 screen pixels, the atlas cell whose upscaled picture
-    // belongs there, or kNone. A reference holds the cell's x in bits 0 to 9 and its y in bits 10 to 19 (in
-    // original pixels; the atlas is 1024 cells wide and high), and in bits 20 to 31 the order in which sprites
-    // were drawn: 0 for a picture underneath everything, then 1 to 4095 counting up and starting again, so the
-    // presenter can tell which of two neighbouring sprites lies on top where their smooth outlines meet.
-    static uint32_t encode(uint32_t x, uint32_t y, uint32_t order) { return (x & 0x3FF) | ((y & 0x3FF) << 10) | (order << 20); }
-    void frame(const Machine& m, uint32_t* refs);
+    // belongs there, or kNone. A reference holds the cell's x in bits 0 to 9, y in bits 10 to 19 (in original
+    // pixels; the atlas is 1024 cells wide and high), drawing order in bits 20 to 30 (0 for a picture
+    // underneath everything, 1 to 2046 wrapping for sprites), and bit 31 set when the slot is dimmed by ambient
+    // lighting so the presenter tints only dimmed HD layers without double-tinting undimmed or DOS pixels.
+    static uint32_t encode(uint32_t x, uint32_t y, uint32_t order, bool dimmed = false) {
+        return (x & 0x3FF) | ((y & 0x3FF) << 10) | ((order & 0x7FF) << 20) | (dimmed ? 0x80000000u : 0u);
+    }
+    // When `vram_snapshot` is provided (64,000 bytes), pixel colours are read from that snapshot rather than
+    // live video memory so the RGBA frame and sprite references always come from the exact same instant.
+    void frame(const Machine& m, uint32_t* refs, const uint8_t* vram_snapshot = nullptr);
+    // Atomically snapshots coherent video memory (64,000 bytes) into `vram_out` and fills `refs` under the
+    // same lock as `begin_present()` and `present_buffer()`, preventing mid-draw flicker and half-copy tearing.
+    // An optional `preprocess_vram` callback may normalize `vram_out` (for example erasing a software cursor)
+    // before sprite references are built, without double-counting frames or duplicating work.
+    void snapshot_and_frame(const Machine& m, uint8_t* vram_out, uint32_t* refs,
+                            const std::function<void(uint8_t*)>& preprocess_vram = {});
 
     // Upscaled pictures that exist on disk and were seen on screen, but are not in the atlas yet. Pictures are
     // only loaded once they show, so the atlas holds what the game has displayed, not every picture on disk.
@@ -155,6 +197,30 @@ public:
     // The atlas cells, gaps included, that the pictures seen on screen in the last frame need.
     uint64_t on_screen_cells();
 
+    // Active ambient RGB lighting multiplier (1, 1, 1 in full daylight, or the dimmed night/weather tint
+    // detected when the game dims its VGA palette uniformly across the active HD screen/sprites).
+    void ambient_tint(float out[3]);
+
+    // Lightweight atlas lookup for the expanded ultrawide world view: resolves a 4-bit game sprite (already in
+    // the atlas or available in upscaled/ on disk) without writing to original/ or layout.txt.
+    struct WorldSpriteInfo {
+        bool placed = false;
+        bool dimmed = false;
+        uint16_t atlas_x = 0, atlas_y = 0;
+        uint64_t key = 0;
+    };
+    void begin_world_frame();
+    WorldSpriteInfo resolve_world_sprite(const Machine& m, uint32_t data, int width, int rows, uint8_t base,
+                                         bool bottom_up = true);
+    // True when the live offscreen colony map buffer is being presented. When optional popup output pointers
+    // are supplied and a popup masks part of the map area, returns true and populates its tight bounding box
+    // instead of forcing a fallback to 4:3 (full-screen VRAM menus still return false).
+    bool is_showing_offscreen_map(int* popup_x0 = nullptr, int* popup_y0 = nullptr, int* popup_x1 = nullptr,
+                                  int* popup_y1 = nullptr, bool* popup_has_holes = nullptr);
+    // Marks unmasked pixels inside an L-shaped popup bounding box with kPopupHole in `refs` so the popup
+    // shader discards leaked 4:3 backdrop/map gaps (such as below the portrait on Intelligence Reports).
+    void mark_popup_holes(uint32_t* refs, int x0, int y0, int x1, int y1);
+
     size_t sprite_count();
     size_t missing_count();  // saved sprites without an upscaled picture yet
 
@@ -176,18 +242,43 @@ private:
         uint32_t atlas;           // x | y << 16 once placed
         std::bitset<256> colours;  // the palette entries the sprite's pixels use
         uint64_t palette;          // their colours when the sprite was saved
-        bool current = true;       // whether those entries still have those colours (updated each frame)
+        std::array<std::array<uint8_t, 3>, 256> ref_dac{};  // 6-bit VGA DAC colours when the sprite was saved
+        bool current = true;       // whether those entries still have those colours (or a uniform ambient dim)
+        bool dimmed = false;       // true when current matched via ambient dimming rather than exact palette
+        float tint[3] = {1.0f, 1.0f, 1.0f};
+        uint64_t shape = 0;        // canonical shape hash in disk_shapes_ (for sprites <= 256x256)
+        uint64_t miss_shape_version = 0;  // last disk_shapes_version_ checked when state == missing
+        bool miss_with_hint = false;      // whether that miss check already had a dimmed ambient hint
+        float miss_hint[3] = {1.0f, 1.0f, 1.0f};
         uint32_t seen = 0;         // the last frame in which the sprite was on screen
+        uint32_t world_seen = 0;   // the last expanded-world frame in which the sprite was visible
+    };
+    struct DiskShape {
+        uint64_t key;
+        int width, rows;
+        bool has_upscaled;
+        std::vector<std::array<uint8_t, 3>> colours;  // 6-bit daytime RGB per canonical non-transparent index
     };
     struct Deferred {
         std::vector<uint8_t> pixels;
         int width, rows;
         uint32_t dest, dest_stride;
+        uint64_t epoch = 0;
+        uint64_t seq = 0;
+        uint64_t present_seq = 0;
+        bool settling = false;
+        std::vector<uint8_t> expected;  // updated when a VRAM text-clear tile overwrites pixels before settle
+        std::vector<uint8_t> masked;    // non-zero where clear_rect() covered pixels before settle
     };
 
     uint32_t slot_for(uint64_t id, uint64_t legacy, int width, int rows, const std::bitset<256>& colours, uint64_t palette,
+                      const std::array<std::array<uint8_t, 3>, 256>& ref_dac,
                       const std::function<std::vector<uint32_t>()>& picture);
-    void take_over(const Machine& m, const Deferred& d);
+    void index_disk_shapes();
+    void take_over(const Machine& m, const Deferred& d, uint64_t matched_key = 0,
+                   const std::array<std::array<uint8_t, 3>, 256>* matched_dac = nullptr);
+    void frame_impl(const Machine& m, uint32_t* refs, const uint8_t* vram_snapshot, uint8_t* vram_out,
+                    const std::function<void(uint8_t*)>& preprocess_vram = {});
     bool settled(const std::bitset<256>& colours) const;
     std::filesystem::path original_file(uint64_t key) const;
     std::filesystem::path upscaled_file(uint64_t key) const;
@@ -195,13 +286,35 @@ private:
     void rename_in_layout(const std::filesystem::path& file, uint64_t from, uint64_t to);
 
     std::vector<Mark> sprite_marks_, image_marks_;  // one of each per byte of memory
+    std::vector<Mark> front_sprite_marks_, front_image_marks_;  // double-buffered snapshot of presented offscreen buffer
+    std::vector<uint8_t> stable_vram_;            // coherent VRAM snapshot held while rep movsw copies to 0xA0000
+    bool has_front_ = false;                      // true once present_buffer() snapshotted front_*_marks_
+    bool presenting_ = false;                     // true between begin_present() and present_buffer()
+    uint32_t front_source_ = 0;                   // linear address whose marks live in front_*_marks_
+    uint64_t present_seq_ = 0;                    // monotonic count incremented on every offscreen present_buffer()
+    std::vector<uint8_t> vram_masked_;            // non-zero where a direct-VRAM UI fill hides the offscreen buffer
     std::atomic<uint32_t> screen_source_{0};
+    std::atomic<bool> vram_dirty_{false};  // whether any sprite, picture or mask has been written directly in 0xA0000..0xAFA00
+    uint64_t vram_epoch_ = 0;              // incremented whenever VRAM overlays are cleared (guarded by mutex_)
+    uint64_t deferred_seq_ = 0;            // monotonic id for each pending picture (guarded by mutex_)
     uint32_t draw_count_ = 0;  // only used on the game thread
     uint32_t frame_count_ = 0;
+    uint32_t world_frame_count_ = 0;
     uint64_t on_screen_cells_ = 0;
+    uint64_t world_on_screen_cells_ = 0;
     std::mutex mutex_;
     std::vector<Slot> slots_;
     std::unordered_map<uint64_t, uint32_t> by_key_;
+    std::unordered_map<uint64_t, std::vector<DiskShape>> disk_shapes_;
+    std::unordered_map<uint64_t, std::vector<DiskShape>> disk_images_;  // upscaled full-screen backdrops indexed by 256-colour shape
+    struct WorldResolveCache {
+        uint32_t slot = UINT32_MAX;  // UINT32_MAX marks a cached miss
+        uint64_t shapes_version = 0;
+        float hint[3] = {1.0f, 1.0f, 1.0f};
+    };
+    std::unordered_map<uint64_t, WorldResolveCache> world_resolve_cache_;
+    uint64_t disk_shapes_version_ = 1;
+    float ambient_tint_[3] = {1.0f, 1.0f, 1.0f};
     std::filesystem::path folder_;
     std::chrono::steady_clock::time_point next_scan_{};
     std::vector<Deferred> deferred_;

@@ -1,0 +1,3 @@
+# The routine in i.mdg that unpacks intro screens (such as gremlin.vgg and utopia.vgg) directly into VGA video memory.
+03a7:0ec4 utopia_intro_unpack_start
+03a7:0f79 utopia_intro_unpack_end

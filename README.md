@@ -8,7 +8,7 @@ The repository contains only the translator and the runtime. It contains no game
 
 | Game | State |
 |---|---|
-| Utopia: The Creation of a Nation (1992) | Playable. The intro, the options screen and the first scenario run natively with mouse control, AdLib music, sound effects and PC speaker sound. |
+| Utopia: The Creation of a Nation (1992) | Playable. The intro, options, planetary radar, advisors, and colony gameplay run natively on Windows 11 with ultrawide Expanded View, floating HUD and dialogs, AI-remastered HD graphics with ambient nighttime dimming, mouse control, AdLib music, sound effects, and PC speaker sound. |
 | Dune II: The Building of a Dynasty (1992) | Not started. |
 
 Some parts of Utopia have not been played through yet. If the game reaches code that was not translated, it stops with a message that names the address, and that address is then added to the game's seed list.
@@ -28,15 +28,25 @@ Copy the files of your copy of Utopia (the folder that contains `u.mdg`, `i.mdg`
 .\build.ps1 -Game utopia
 ```
 
-The script translates the original program files into `generated\utopia` and compiles `build\utopia\Utopia.exe`. A different game folder can be given with `-GameFolder <folder>`. With `-Tests` the script first builds and runs the runtime tests, which need no game files. With `-Trace` the translated program also records which instruction wrote each byte of memory, which helps to find a game's drawing routines.
+The script translates the original program files into `generated\utopia`, compiles `build\utopia\Utopia.exe`, and copies `models\`, `LICENSE`, and `THIRD-PARTY-NOTICES.txt` next to the executable. A different game folder can be given with `-GameFolder <folder>`. With `-Tests` the script first builds and runs the runtime tests, which need no game files. With `-Trace` the translated program also records which instruction wrote each byte of memory, which helps to find a game's drawing routines.
 
 ## Playing
 
-Start `build\utopia\Utopia.exe`. In windowed mode, clicking inside the picture activates mouse control, and `Right Ctrl`, middle click, `Alt+Tab`, `Alt+Space`, or `Alt+F4` release the pointer cleanly. `Alt+Enter` switches between a window and borderless fullscreen.
+Start `build\utopia\Utopia.exe`. On first launch, the game defaults to **AI upscaling** and **Expanded View** (falling back cleanly to sharp pixels if the AI model is unavailable), and remembers any changes you make with `F9` or `F11` in `settings.ini`.
 
-`F9` switches between the **Expanded View** (the default in AI upscaling mode on widescreen and ultrawide monitors) and the classic centered 4:3 view; the choice is remembered in `settings.ini`. Expanded View renders Utopia's full 75x100 isometric colony map directly at native monitor resolution with smooth mouse-wheel zoom, panning via `WASD`, arrow keys, middle-drag, or right-drag, and click-anywhere building interaction. Docked HD HUD strips float cleanly over the terrain, the empty bottom message console hides automatically until Utopia prints a message, and in-game dialogs such as `SELECT A BUILDING..`, building info, Trade/Finance, and Intelligence Reports float over the dimmed colony map while full-screen sub-screens (Options, Advisors, Planetary Radar/Map) render at crisp 4:3 aspect ratio.
+Expanded View renders Utopia's full 75x100 isometric colony map directly at native monitor resolution with smooth mouse-wheel zoom, panning via `WASD`, arrow keys, middle-drag, or right-drag, and click-anywhere building interaction using Utopia's live 10x10 software cursor. Docked HD HUD strips float cleanly over the terrain, the empty bottom message console hides automatically until Utopia prints a message (expanding into a compact dark-glass toast sized to active text lines), and in-game dialogs such as `SELECT A BUILDING..`, building info, Trade/Finance, and Intelligence Reports float cleanly over the dimmed colony map while full-screen sub-screens (Options, Advisors, Planetary Radar/Map) render at crisp 4:3 aspect ratio.
 
-`F11` switches between four picture filters: sharp pixels, smooth edges (stair steps along diagonal and round edges are redrawn as smooth lines), a CRT look with scanlines, and AI upscaling; the choice is remembered for the next start. The AI filter draws remastered sprites, buildings, terrain tiles, and screens from high-resolution pictures with smooth alpha compositing and ambient nighttime dimming, while keeping bitmap fonts, cursors, and un-remastered details razor-sharp with sharp-bilinear scaling. `F12` saves a screenshot exactly as the picture appears on screen.
+| Control | Action |
+|---|---|
+| `F9` | Switch between Expanded ultrawide view and classic 4:3 view (saved in `settings.ini`). |
+| `F11` | Cycle picture filters: sharp pixels, smooth edges, CRT scanlines, and AI upscaling (saved in `settings.ini`). |
+| `F12` | Save a PNG screenshot of the rendered screen to `%LOCALAPPDATA%\Nax Game Restoration\utopia\shots`. |
+| `Alt+Enter` | Toggle between windowed mode and borderless fullscreen. |
+| Mouse wheel | Zoom the colony map in or out in Expanded View (`0.45x` to `2.00x`). |
+| `WASD`, Arrow keys, Middle-drag, Right-drag | Pan smoothly across the 75x100 planet map in Expanded View (a short right-click still cancels build mode). |
+| `Right Ctrl`, Middle click, `Alt+Tab`, `Alt+Space`, `Alt+F4` | Release mouse capture cleanly in classic windowed mode or close the window. |
+
+In classic 4:3 windowed mode, clicking inside the game picture activates mouse capture without forwarding a stray click, while clicking outside the picture leaves the Windows cursor free. The AI filter draws remastered sprites, buildings, terrain tiles, and screens from high-resolution pictures with smooth two-layer alpha compositing, double-buffered zero-flicker presentation, and ambient nighttime dimming, while keeping bitmap fonts, cursors, and un-remastered details razor-sharp with sharp-bilinear scaling.
 
 ## AI-upscaled sprites
 
@@ -50,7 +60,7 @@ The tool works best with a large ESRGAN model. Download `RealESRGAN_x4plus.pth` 
 
 ### Redrawing sprites with an image editing model
 
-An upscaler can only sharpen what a 32-pixel sprite already shows, and on such small pictures it mostly invents noise. With an NVIDIA graphics card with 16 GB, `tools\ai\remaster.py` goes further: the image editing model Qwen-Image-Edit-2511 paints every saved sprite and screen picture again as detailed artwork, keeping its shape, layout and colours. Buildings get real walls, windows and roofs. Ground tiles are painted as one continuous field of identical tiles, so the ground has no borders between tiles. Flat tiles such as landing pads keep their painted markings where they are. While the game runs, the runtime records in `hd\layout.txt` which sprites it draws side by side, and flat tiles with markings that lie next to each other, such as the four tiles of a landing pad, and the pieces of a building that stands on several tiles, such as the command center, are painted together as one picture and cut apart again, so a pad or a building looks like one and not like four small ones. A tile of such a group that already has a picture keeps it unless `--again` is given. Each sprite is painted several times (`--tries`, 4 by default), and the version closest to the original pixels is kept. Afterwards the broad colours always come from the original and only the fine detail from the model, so buttons and panels keep their colours. Sprites drawn while the screen was black are skipped. The tool needs its own Python environment with PyTorch, which is kept apart from the system's Python:
+An upscaler can only sharpen what a 32-pixel sprite already shows, and on such small pictures it mostly invents noise. With an NVIDIA graphics card with 16 GB, `tools\ai\remaster.py` goes further: the image editing model Qwen-Image-Edit-2511 paints every saved sprite and screen picture again as detailed 24-bit artwork, keeping its shape, layout and colours. Buildings get real walls, windows and roofs, natural geological formations receive biome-matched mountain and ice-chasm prompts that preserve pitch-black abyss voids, toxic-lake shorelines are composited seamlessly from the HD acid water and ground tiles, and compass markers are rendered deterministically at 8x with crisp bevelled edges. Ground tiles are painted as one continuous field of identical tiles, so the ground has no borders between tiles. Flat tiles such as landing pads keep their painted markings where they are. While the game runs, the runtime records in `hd\layout.txt` which sprites it draws side by side, and flat tiles with markings that lie next to each other, such as the four tiles of a landing pad, and the pieces of a building that stands on several tiles, such as the command center, are painted together as one picture and cut apart again, so a pad or a building looks like one and not like four small ones. A tile of such a group that already has a picture keeps it unless `--again` is given. Each sprite is painted several times (`--tries`, 4 by default), and the version closest to the original pixels is kept. Afterwards the broad colours are gently anchored toward the original while letting rich 24-bit lighting and material detail shine through. Sprites drawn while the screen was black or under ambient nighttime dimming are skipped automatically. The tool needs its own Python environment with PyTorch, which is kept apart from the system's Python:
 
 ```powershell
 py -3.15 -m venv "$env:LOCALAPPDATA\Nax Game Restoration\ai-env"
@@ -61,7 +71,7 @@ py -3.15 -m venv "$env:LOCALAPPDATA\Nax Game Restoration\ai-env"
 
 On first use it downloads about 30 GB into `%LOCALAPPDATA%\Nax Game Restoration\hf-cache`: the 4-bit form of the model from unsloth/Qwen-Image-Edit-2511-GGUF, the text encoder and the other parts of Qwen/Qwen-Image-Edit-2511, and the 8-step Lightning adapter from lightx2v/Qwen-Image-Edit-2511-Lightning, all under the Apache License 2.0. Both large parts of the model stay in main memory and come to the graphics card a few layers at a time, so the tool needs about 40 GB of free main memory. Each try of a sprite takes about half a minute.
 
-Once this environment exists, nothing has to be started by hand. Whenever the game has saved new sprites, it runs `remaster.py` in the background on the graphics card, at low priority and only with models that are already on the machine, and the new pictures appear in the game when they are done. While the game fades its colours, the redrawn pictures make way for the original pixels, because they were made with the colours before the fade. The tool's output goes to `hd\redraw.log`, and `--no-redraw` switches the background runs off for one start. The tests of `remaster.py` run with the Python of this environment, with `-m unittest discover -s tests -p test_remaster.py`; other Pythons skip them.
+Once this environment exists, nothing has to be started by hand. Whenever the game has saved new sprites, it runs `remaster.py` in the background on the graphics card, at low priority and only with models that are already on the machine, and the new pictures appear in the game when they are done. During ambient nighttime or weather dimming, the runtime keeps daytime HD sprites active and applies the scene's ambient lighting tint smoothly while keeping emissive lights bright; only non-uniform fades fall back to original pixels. The tool's output goes to `hd\redraw.log`, and `--no-redraw` switches the background runs off for one start. The tests of `remaster.py` run with the Python of this environment, with `-m unittest discover -s tests -p test_remaster.py`; other Pythons skip them.
 
 The older tool `tools\ai\generate_sprites.py` enlarges sprites with RealESRGAN_x4plus and can add Stable Diffusion XL detail and a seamless ground texture made by `tools\ai\generate_texture.py`. It is kept for comparison, but its results are much weaker.
 
@@ -87,7 +97,11 @@ Utopia does not play music on its own. On the options screen, click the disk but
 
 ## Where files go
 
-The original game files are never changed. Save games and every other file the game writes go to `%LOCALAPPDATA%\Nax Game Restoration\utopia\files`, and the game reads its own saves from there first. Each write goes to a temporary file that replaces the old version only when the game closes the file normally, so an interrupted save keeps the previous one. Screenshots go to the `shots` folder, the saved and upscaled sprites to the `hd` folder, and a runtime log to `runtime.log` in the same place.
+The original game files are never changed (even read-only files from CD-ROMs or archives work through copy-on-write). Save games and every other file the game writes go to `%LOCALAPPDATA%\Nax Game Restoration\utopia\files`, and the game reads its own saves from there first. Each write goes to a non-inheritable temporary file that replaces the old version atomically only when the game closes the file normally, so an interrupted save or background remastering run keeps the previous version intact. Screenshots go to the `shots` folder, the saved and upscaled sprites to the `hd` folder, and a runtime log to `runtime.log` in the same place.
+
+### Standalone local folder layout
+
+When you move `Utopia.exe` outside the build tree on your own machine, it automatically looks for the original game files (`u.mdg`, `i.mdg`, `scenario\`, and the other DOS files) in the same folder as `Utopia.exe`, then in a `game\` subfolder next to `Utopia.exe`, then in `..\gamedata\utopia` and `..\..\gamedata\utopia` (or at the path given with `--data <folder>`). If you also place a local `hd\upscaled` and `hd\original` folder next to `Utopia.exe` (or inside `game\hd\`), the runtime atomically copies any missing PNGs into `%LOCALAPPDATA%\Nax Game Restoration\utopia\hd\` on startup without overwriting newer local files.
 
 ## Layout
 
@@ -96,11 +110,11 @@ The original game files are never changed. Save games and every other file the g
 | `tools/recomp` | The translator: the MZ and EXEPACK loader, code discovery and the C++ generator, written in Python. |
 | `tools/ai` | The converter that turns a Real-ESRGAN checkpoint into the AI filter's weight file without PyTorch, a CPU reference of the network for checking the GPU version, the ESRGAN network for large models, the tool that upscales the saved sprites, and the tool that redraws them with an image editing model. |
 | `models` | The AI filter's weights and their license. The build copies them next to the program. |
-| `runtime` | The native runtime: CPU helpers, DOS, BIOS, mouse and VGA services, the OPL2 synthesiser, sound output, the sprite tracker and the Direct3D 12 window. |
-| `games/<game>` | What each game needs: the replacement for its launcher and the seed lists of entry points that discovery cannot prove, and the hooks that report the game's sprite drawing. |
-| `tests` | Python tests for the translator and C++ tests for the runtime. |
+| `runtime` | The native runtime: CPU helpers, DOS, BIOS, mouse and VGA services, the OPL2 synthesiser, sound output, the sprite tracker, Expanded View geometry, and the Direct3D 12 window. |
+| `games/<game>` | What each game needs: the replacement for its launcher, the seed lists of entry points that discovery cannot prove, and the hooks that report the game's sprite drawing. |
+| `tests` | Python tests for the translator and AI tools, plus C++ tests for the runtime. |
 | `gamedata/<game>` | Your copy of the game. Git ignores this folder. |
-| `generated`, `build` | The translated code and the built program, both derived from your copy. Git ignores these folders. |
+| `generated`, `build`, `out` | The translated code, compiled program, and any local packaging output derived from your copy. Git ignores these folders. |
 
 ## Third-party components
 

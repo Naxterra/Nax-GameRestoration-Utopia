@@ -300,6 +300,16 @@ class RemasterTests(unittest.TestCase):
         blink_cur = [(16, 16, 16), (18, 18, 18), (20, 20, 20), (22, 22, 22), (57, 57, 57)]
         self.assertFalse(remaster.is_dimmed_or_near_duplicate(blink_ref, blink_cur))
 
+    def test_solar_panel_nighttime_accent_dim_is_filtered_as_duplicate_while_hue_swap_is_kept(self):
+        day_pal = [(51, 0, 0), (44, 0, 0), (60, 60, 0), (0, 17, 0), (33, 0, 0), (0, 30, 0),
+                   (38, 22, 12), (29, 28, 34), (31, 31, 31), (24, 24, 34), (16, 16, 24)]
+        night_pal = [(31, 0, 0), (26, 0, 0), (29, 22, 0), (0, 10, 0), (20, 0, 0), (0, 17, 0),
+                     (22, 12, 8), (17, 16, 24), (19, 19, 23), (14, 14, 24), (9, 9, 17)]
+        self.assertTrue(remaster.is_dimmed_or_near_duplicate(day_pal, night_pal))
+        swapped_pal = list(night_pal)
+        swapped_pal[2] = (0, 22, 29)  # hue swap introducing blue where daytime had zero blue
+        self.assertFalse(remaster.is_dimmed_or_near_duplicate(day_pal, swapped_pal))
+
 
 if __name__ == "__main__":
     unittest.main()

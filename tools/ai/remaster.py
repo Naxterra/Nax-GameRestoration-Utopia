@@ -1073,7 +1073,45 @@ def is_dimmed_or_near_duplicate(ref_pal, cur_pal):
 
     if try_fit(False):
         return True
-    return len(ref_pal) >= 4 and try_fit(True)
+    if len(ref_pal) >= 4 and try_fit(True):
+        return True
+    # Mirror hd_sprites.cpp: allow one non-uniformly dimmed accent entry (such as a solar panel highlight turning
+    # from bright yellow to warm amber at night) when every remaining visible colour fits a tight uniform tint.
+    if len(ref_pal) >= 6:
+        for skip, (sr, sc) in enumerate(zip(ref_pal, cur_pal)):
+            if max(sr) < 6:
+                continue
+            if any(sc[ch] > sr[ch] or (sr[ch] == 0) != (sc[ch] == 0) or sc[ch] < sr[ch] * 0.25 - 2.0 for ch in range(3)):
+                continue
+            sum_ref, sum_cur = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+            dimmed, decreased = 0, 0
+            for i, (r, c) in enumerate(zip(ref_pal, cur_pal)):
+                if i == skip or max(r) < 6:
+                    continue
+                if any(c[ch] < r[ch] for ch in range(3)):
+                    decreased += 1
+                dimmed += 1
+                for ch in range(3):
+                    sum_ref[ch] += r[ch]
+                    sum_cur[ch] += c[ch]
+            if dimmed < 5 or decreased < 4:
+                continue
+            scales = [sum_cur[ch] / sum_ref[ch] if sum_ref[ch] >= 8.0 else -1.0 for ch in range(3)]
+            active = [s for s in scales if s >= 0.0]
+            if len(active) < 2 or sum(1 for s in active if s < 0.96) < 2:
+                continue
+            avg = sum(active) / len(active)
+            scales = [s if s >= 0.0 else avg for s in scales]
+            if min(scales) < 0.25 or max(scales) > 0.98 or max(scales) / min(scales) > 1.60:
+                continue
+            if all(
+                abs(c[ch] - r[ch] * scales[ch]) <= 3.5
+                for i, (r, c) in enumerate(zip(ref_pal, cur_pal))
+                if i != skip and max(r) >= 6
+                for ch in range(3)
+            ):
+                return True
+    return False
 
 
 def filter_ambient_duplicates(sprites, candidates, upscaled_names):

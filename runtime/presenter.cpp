@@ -241,6 +241,14 @@ bool is_grey_speckle(float3 c) {
     float lum = (c.r + c.g + c.b) / 3.0;
     return (hi - lo) < 0.045 && lum >= 0.19 && lum <= 0.435;
 }
+bool is_grey_speckle_tinted(float3 c) {
+    if (!any(tint < 0.995)) return is_grey_speckle(c);
+    float3 norm = c / max(tint, float3(0.35, 0.35, 0.35));
+    float hi = max(norm.r, max(norm.g, norm.b));
+    float lo = min(norm.r, min(norm.g, norm.b));
+    float lum = (norm.r + norm.g + norm.b) / 3.0;
+    return (hi - lo) < 0.055 && lum >= 0.15 && lum <= 0.435;
+}
 float4 world_ps(WVOut i) : SV_Target {
     // col.a encodes the quad type:
     //   >= 6.5          : L-shaped floating popup (like mode 6, plus discards right sidebar button zone 268..315, 79..158)
@@ -261,7 +269,7 @@ float4 world_ps(WVOut i) : SV_Target {
         float2 f = s - p;
         if (r == 0xFFFFFFFFu) {
             float3 raw = texel(p);
-            if (!is_grey_speckle(raw)) return float4(raw, 1.0);
+            if (!is_grey_speckle_tinted(raw)) return float4(raw, 1.0);
         }
         // Two-layer HD compositing matching ai_picture(uv) over the sleek dark panel so multi-tile HD buildings
         // inside SELECT A BUILDING.. blend cleanly across internal tile seams and respect night dimming.
@@ -323,7 +331,7 @@ float4 world_ps(WVOut i) : SV_Target {
         if (r != 0xFFFFFFFFu && order_of(r) == 0) discard;
         if (r == 0xFFFFFFFFu || r == 0xFFFFFFFEu) {
             float3 raw = texel(p);
-            if (p.y >= 170 && max(raw.r, max(raw.g, raw.b)) < 0.08) discard;
+            if (p.y >= 159 && (max(raw.r, max(raw.g, raw.b)) < 0.08 || is_grey_speckle_tinted(raw))) discard;
             return float4(raw, 1.0);
         }
         return float4(ai_picture(i.uv), 1.0);
@@ -1138,7 +1146,9 @@ void Presenter::draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, 
 
         // 4. Sleek compact dark frames for the docked HUD strips (no full-width black wings).
         const bool hide_top = world->has_popup && (world->popup_src_y < 14);
-        const bool hide_bottom = (world->has_popup && (world->popup_src_y + world->popup_src_h > 170)) || !world->has_bottom_message;
+        const bool hide_bottom =
+            (world->has_popup && (world->popup_src_y + world->popup_src_h > 170) && !world->has_warning_banner) ||
+            !world->has_bottom_message;
         for (size_t si = 0; si < world->hud_strips.size(); si++) {
             if (world->has_popup && si == 4) continue;  // hide scroll-arrow pad while a modal popup is open
             if (hide_top && (si == 0 || si == 2)) continue;  // hide top bar & compass when an advisor report covers them
@@ -1158,11 +1168,15 @@ void Presenter::draw(const uint32_t* rgba, const uint32_t* hd_refs, int filter, 
                 push_tri(cx, t, r, cy, cx, b, 0.03f, 0.035f, 0.05f, 0.94f);
                 push_tri(cx, t, cx, b, l, cy, 0.03f, 0.035f, 0.05f, 0.94f);
             } else if (s.key_out_backdrop) {
-                // Compact floating dark-glass status pill at the top centre with crisp metallic border.
+                // Compact floating dark-glass status or warning pill with crisp metallic (or amber warning) border.
+                const bool warn_pill = (si == 1 && world->has_warning_banner);
                 const float x0 = float(s.dst.left) - 12.0f, x1 = float(s.dst.right) + 12.0f;
                 const float y0 = float(s.dst.top) - 2.0f, y1 = float(s.dst.bottom) + 2.0f;
-                push_quad(x0 - 1.5f, y0 - 1.5f, x1 + 1.5f, y1 + 1.5f, 0, 0, 0, 0, 0.30f, 0.35f, 0.44f, 0.85f);
-                push_quad(x0, y0, x1, y1, 0, 0, 0, 0, 0.055f, 0.065f, 0.090f, 0.90f);
+                push_quad(x0 - 1.5f, y0 - 1.5f, x1 + 1.5f, y1 + 1.5f, 0, 0, 0, 0,
+                          warn_pill ? 0.82f : 0.30f, warn_pill ? 0.38f : 0.35f, warn_pill ? 0.22f : 0.44f,
+                          warn_pill ? 0.94f : 0.85f);
+                push_quad(x0, y0, x1, y1, 0, 0, 0, 0,
+                          warn_pill ? 0.11f : 0.055f, warn_pill ? 0.055f : 0.065f, warn_pill ? 0.055f : 0.090f, 0.92f);
             } else {
                 push_quad(float(s.dst.left) - 2.0f, float(s.dst.top) - 2.0f, float(s.dst.right) + 2.0f, float(s.dst.bottom) + 2.0f,
                           0, 0, 0, 0, 0.03f, 0.035f, 0.05f, 0.92f);

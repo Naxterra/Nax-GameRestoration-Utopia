@@ -297,7 +297,84 @@ bool match_ambient_dim(const std::vector<std::array<uint8_t, 3>>& ref, const std
     // Fit all visible entries first so mild uniform fades (92% to 97%, where mid-tones shift by only 1 or 2
     // DAC steps) never fall into a dead zone between match_near_exact and the emissive-window fallback.
     if (try_fit(false)) return true;
-    return ref.size() >= 4 && try_fit(true);
+    if (ref.size() >= 4 && try_fit(true)) return true;
+    // Allow at most one non-uniformly dimmed accent entry (for example a solar panel highlight dimming from
+    // bright yellow to warm amber at night) when every remaining visible colour fits a tight uniform tint.
+    if (ref.size() >= 6) {
+        for (size_t skip = 0; skip < ref.size(); skip++) {
+            const auto& sr = ref[skip];
+            const auto& sc = cur[skip];
+            if (std::max({int(sr[0]), int(sr[1]), int(sr[2])}) < 6) continue;
+            bool valid_outlier = true;
+            for (int ch = 0; ch < 3; ch++) {
+                if (int(sc[ch]) > int(sr[ch]) || (sr[ch] == 0) != (sc[ch] == 0) ||
+                    float(sc[ch]) < float(sr[ch]) * 0.25f - 2.0f) {
+                    valid_outlier = false;
+                    break;
+                }
+            }
+            if (!valid_outlier) continue;
+            double sum_ref[3] = {0, 0, 0}, sum_cur[3] = {0, 0, 0};
+            int dimmed_entries = 0, decreased_entries = 0;
+            for (size_t i = 0; i < ref.size(); i++) {
+                if (i == skip) continue;
+                const auto& r = ref[i];
+                const auto& c = cur[i];
+                if (std::max({int(r[0]), int(r[1]), int(r[2])}) < 6) continue;
+                if (c[0] < r[0] || c[1] < r[1] || c[2] < r[2]) decreased_entries++;
+                dimmed_entries++;
+                for (int ch = 0; ch < 3; ch++) {
+                    sum_ref[ch] += r[ch];
+                    sum_cur[ch] += c[ch];
+                }
+            }
+            if (dimmed_entries < 5 || decreased_entries < 4) continue;
+            float s[3] = {-1.0f, -1.0f, -1.0f};
+            int active = 0, dimmed_channels = 0;
+            float avg = 0.0f;
+            for (int ch = 0; ch < 3; ch++) {
+                if (sum_ref[ch] >= 8.0) {
+                    s[ch] = float(sum_cur[ch] / sum_ref[ch]);
+                    active++;
+                    if (s[ch] < 0.96f) dimmed_channels++;
+                    avg += s[ch];
+                }
+            }
+            if (active < 2 || dimmed_channels < 2) continue;
+            avg /= float(active);
+            for (int ch = 0; ch < 3; ch++)
+                if (s[ch] < 0.0f) s[ch] = hint ? hint[ch] : avg;
+            const float min_s = std::min({s[0], s[1], s[2]});
+            const float max_s = std::max({s[0], s[1], s[2]});
+            if (min_s < 0.25f || max_s > 0.98f || max_s / min_s > 1.60f) continue;
+            if (hint && (std::fabs(s[0] - hint[0]) > 0.22f || std::fabs(s[1] - hint[1]) > 0.22f || std::fabs(s[2] - hint[2]) > 0.22f))
+                continue;
+            float total_err = 0.0f;
+            bool ok = true;
+            for (size_t i = 0; i < ref.size(); i++) {
+                if (i == skip) continue;
+                const auto& r = ref[i];
+                const auto& c = cur[i];
+                if (std::max({int(r[0]), int(r[1]), int(r[2])}) < 6) continue;
+                for (int ch = 0; ch < 3; ch++) {
+                    const float diff = std::fabs(float(c[ch]) - float(r[ch]) * s[ch]);
+                    if (diff > 3.5f) {
+                        ok = false;
+                        break;
+                    }
+                    total_err += diff;
+                }
+                if (!ok) break;
+            }
+            if (!ok) continue;
+            tint_out[0] = std::clamp(s[0], 0.25f, 1.0f);
+            tint_out[1] = std::clamp(s[1], 0.25f, 1.0f);
+            tint_out[2] = std::clamp(s[2], 0.25f, 1.0f);
+            if (err_out) *err_out = total_err / float(dimmed_entries * 3);
+            return true;
+        }
+    }
+    return false;
 }
 
 bool match_slot_ambient(const Machine& m, const std::bitset<256>& colours, const std::array<std::array<uint8_t, 3>, 256>& ref_dac,

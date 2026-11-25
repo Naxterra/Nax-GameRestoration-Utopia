@@ -194,7 +194,8 @@ bool WorldView::crop_sidebar_for_popup(HudStrip& strip, const WorldRenderData* a
 
 bool WorldView::fit_bottom_strip_for_message(HudStrip& strip, const WorldRenderData* active_world) {
     if (!active_world || !active_world->has_bottom_message || active_world->bottom_msg_src_h <= 0) return false;
-    const int fit_h = std::clamp(active_world->bottom_msg_src_h, 13, 28);
+    const int fit_y = std::clamp(active_world->bottom_msg_src_y, 159, 170);
+    const int fit_h = std::clamp(active_world->bottom_msg_src_h, 10, 200 - fit_y);
     const int orig_h = std::max(1, strip.src_h);
     const int orig_w = std::max(1, strip.src_w);
     const int dst_h = int(strip.dst.bottom - strip.dst.top);
@@ -203,11 +204,11 @@ bool WorldView::fit_bottom_strip_for_message(HudStrip& strip, const WorldRenderD
     const int inset_x = int(std::round(float(dst_w) * 4.0f / float(orig_w)));
     strip.src_x = 4;
     strip.src_w = 312;
-    strip.src_y = 170;
+    strip.src_y = fit_y;
     strip.src_h = fit_h;
     strip.dst.left += inset_x;
     strip.dst.right -= inset_x;
-    strip.dst.top = strip.dst.bottom - new_dst_h;
+    strip.dst.top = std::max(0L, strip.dst.bottom - new_dst_h);
     strip.key_out_backdrop = true;
     return true;
 }

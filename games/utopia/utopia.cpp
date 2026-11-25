@@ -138,7 +138,6 @@ void utopia_sprite_dynamic(nax::Machine& m) {
     const bool bottom_up = step < 0;
     if (m.c.es == picture_buffer(m)) {
         m.hd->set_screen_source(nax::Machine::linear(m.c.es, 0));
-        record_dynamic_sprite(m, data, 32, m.c.c.x, m.c.di, 0, bottom_up);
     }
     m.hd->draw(m, data, 32, m.c.c.x, nax::Machine::linear(m.c.es, m.c.di), 0, bottom_up, false);
 }
@@ -553,50 +552,77 @@ bool build_world_render(const nax::Machine& m, nax::HdSprites& hd, nax::WorldVie
     }
 
     // Auto-hide the empty bottom message console so it does not leave a large blank black box over the ultrawide
-    // colony map, and size it tightly to active text rows (with 250 ms hold hysteresis) whenever Utopia prints a message.
-    // Suppress and clear the hold timer whenever a tall popup overlaps y >= 171 so popup pixels cannot cause a flash on close.
+    // colony map, and size it tightly to active text rows (with 250 ms hold hysteresis) whenever Utopia prints a
+    // console message (y = 171..196) or a gameplay/construction warning banner (0ffe:773b at y = 160..166, timer ds:[0x2e20]).
     {
         static ULONGLONG s_last_msg_ms = 0;
         static int s_last_msg_h = 0;
-        if (out->has_popup && (out->popup_src_y + out->popup_src_h) > 170) {
-            s_last_msg_h = 0;
-            out->has_bottom_message = false;
-            out->bottom_msg_src_h = 0;
-        } else {
+        const bool warning_active = static_cast<int16_t>(m.rd16(ds, 0x2e20)) > 0;
+        const bool console_timer = static_cast<int16_t>(m.rd16(ds, 0x2d92)) > 0;
+        const bool tall_popup = out->has_popup && (out->popup_src_y + out->popup_src_h) > 170;
+
+        int bright_px = 0;
+        int max_text_y = 170;
+        if (!tall_popup) {
             const uint8_t* vram = m.vram();
             const uint16_t cur_off = m.rd16(ds, 0x5e3a);
             const int cur_x = (cur_off != 0xFFFF && cur_off < 64000) ? int(cur_off % 320) : -32;
             const int cur_y = (cur_off != 0xFFFF && cur_off < 64000) ? int(cur_off / 320) : -32;
-            int bright_px = 0;
-            int max_text_y = 170;
             for (int y = 171; y <= 196; y++) {
                 const size_t row_off = size_t(y) * 320;
                 for (int x = 8; x <= 311; x++) {
                     if (x >= cur_x && x < cur_x + 10 && y >= cur_y && y < cur_y + 10) continue;
                     const uint8_t c = vram[row_off + size_t(x)];
-                    // Empty main_scr.vgg stipple peaks at DAC 14; active yellow/silver/coloured text is >= 22 even at night.
+                    // Empty main_scr.vgg console stipple peaks at DAC 14; yellow/silver/coloured text is >= 18 even at night.
                     const uint8_t hi = std::max({m.dac[c][0], m.dac[c][1], m.dac[c][2]});
-                    if (hi >= 22) {
+                    if (hi >= 18) {
                         bright_px++;
                         if (y > max_text_y) max_text_y = y;
                     }
                 }
             }
-            const ULONGLONG now_ms = GetTickCount64();
-            if (bright_px >= 6) {
-                const int fit_h = std::clamp((max_text_y - 170) + 4, 13, 28);
+        }
+        const bool console_active = !tall_popup && (bright_px >= 6 || (console_timer && bright_px >= 3));
+        const ULONGLONG now_ms = GetTickCount64();
+
+        if (warning_active) {
+            // Warning banners are driven by Utopia's exact tick timer ds:[0x2e20] and erased immediately on 0, so
+            // never hold a warning-only pill in the 250 ms console hysteresis cache after ds:[0x2e20] expires.
+            if (console_active) {
                 s_last_msg_ms = now_ms;
-                s_last_msg_h = fit_h;
-                out->has_bottom_message = true;
-                out->bottom_msg_src_h = fit_h;
-            } else if (s_last_msg_h > 0 && (now_ms - s_last_msg_ms) < 250) {
-                out->has_bottom_message = true;
-                out->bottom_msg_src_h = s_last_msg_h;
+                s_last_msg_h = std::clamp((max_text_y - 170) + 4, 13, 28);
             } else {
                 s_last_msg_h = 0;
-                out->has_bottom_message = false;
-                out->bottom_msg_src_h = 0;
             }
+            out->has_bottom_message = true;
+            out->has_warning_banner = true;
+            out->bottom_msg_src_y = 159;
+            out->bottom_msg_src_h = console_active ? std::clamp((max_text_y - 159) + 4, 22, 40) : 10;
+        } else if (console_active) {
+            const int fit_h = std::clamp((max_text_y - 170) + 4, 13, 28);
+            s_last_msg_ms = now_ms;
+            s_last_msg_h = fit_h;
+            out->has_bottom_message = true;
+            out->has_warning_banner = false;
+            out->bottom_msg_src_y = 170;
+            out->bottom_msg_src_h = fit_h;
+        } else if (tall_popup) {
+            s_last_msg_h = 0;
+            out->has_bottom_message = false;
+            out->has_warning_banner = false;
+            out->bottom_msg_src_y = 170;
+            out->bottom_msg_src_h = 0;
+        } else if (s_last_msg_h > 0 && (now_ms - s_last_msg_ms) < 250) {
+            out->has_bottom_message = true;
+            out->has_warning_banner = false;
+            out->bottom_msg_src_y = 170;
+            out->bottom_msg_src_h = s_last_msg_h;
+        } else {
+            s_last_msg_h = 0;
+            out->has_bottom_message = false;
+            out->has_warning_banner = false;
+            out->bottom_msg_src_y = 170;
+            out->bottom_msg_src_h = 0;
         }
     }
 
@@ -671,8 +697,115 @@ bool build_world_render(const nax::Machine& m, nax::HdSprites& hd, nax::WorldVie
             return tile_cache.emplace(tid, ct).first->second;
         };
 
-        // Build visible planet map tiles in strict back-to-front isometric painter's order (diagonal sum r + c).
-        out->tiles.reserve(size_t((r1 - r0 + 1) * (c1 - c0 + 1)) + dynamics.size());
+        // Collect all active mobile units, launched missiles, aircraft, explosions, pods, and beacons directly from
+        // Utopia's 8 entity tables in ds: (0ffe:f60e and 0ffe:db8a) across the full ultrawide viewport so launched
+        // missiles and units never vanish when climbing above DOS y = 0 or leaving Utopia's tiny 8x8 tile window.
+        struct LiveEntity {
+            int row = 0, col = 0;
+            int pixel_dx = 0, pixel_dy = 0;
+            int altitude = 0;
+            int rows = 15;
+            uint32_t data_lin = 0;
+            bool airborne = false;
+        };
+        struct EntityTableSpec {
+            uint16_t base_off;
+            uint16_t stride;
+            int max_slots;
+            uint16_t count_off;  // 0 = scan all max_slots
+            int alt_off;         // -1 = use fixed_alt
+            int fixed_alt;
+            bool airborne;
+        };
+        static constexpr EntityTableSpec kEntityTables[] = {
+            {0x7370, 0x18, 99, 0x2b23, -1, 0, false},   // friendly ground units
+            {0x6fb0, 0x18, 40, 0x2b25, 0x10, 0, true},  // friendly aircraft & launched missiles
+            {0x6998, 0x1a, 60, 0x2b29, -1, 0, false},   // enemy ground units
+            {0x668c, 0x1a, 30, 0x2b2b, 0x10, 0, true},  // enemy aircraft & missiles
+            {0x659b, 0x08, 30, 0x2e22, 0x06, 0, true},  // explosions & smoke puffs
+            {0x2cb9, 0x00, 1, 0x0000, -1, 13, true},    // animated airborne effect
+            {0x2cad, 0x00, 1, 0x0000, 0x06, 0, true},   // incoming meteor / pod / rocket
+            {0x2d29, 0x0a, 8, 0x0000, -1, 0, true},     // colony beacons 1..8
+        };
+        std::vector<LiveEntity> ground_entities;
+        std::vector<LiveEntity> air_entities;
+        for (const auto& tbl : kEntityTables) {
+            const int active_limit = tbl.count_off ? int(m.rd16(ds, tbl.count_off)) : tbl.max_slots;
+            if (active_limit <= 0) continue;
+            int found = 0;
+            for (int slot = 0; slot < tbl.max_slots && found < active_limit; slot++) {
+                const uint16_t ent = uint16_t(tbl.base_off + slot * tbl.stride);
+                const uint8_t type = m.rd8(ds, ent);
+                if (!type) continue;
+                found++;
+                if (type > 27) continue;  // ds:0x1681 holds 21 base entries (1..21) + 6 scenario entries (22..27)
+                const int ec = int(m.rd8(ds, uint16_t(ent + 1)));
+                const int er = int(m.rd8(ds, uint16_t(ent + 2)));
+                if (er >= nax::WorldView::kMapRows || ec >= nax::WorldView::kMapCols) continue;
+                const int pad_lo = tbl.airborne ? 4 : 2;
+                const int pad_hi = tbl.airborne ? 12 : 2;
+                if (er < r0 - pad_lo || er > r1 + pad_hi || ec < c0 - pad_lo || ec > c1 + pad_hi) continue;
+                const uint16_t desc = uint16_t(0x1681 + (uint16_t(type) - 1u) * 34u);
+                const uint8_t frame = m.rd8(ds, uint16_t(ent + 5));
+                if (frame >= 10) continue;
+                uint16_t dx_off = 0;
+                if (type == 0x18 && tbl.stride >= 21) {
+                    const int8_t var = static_cast<int8_t>(m.rd8(ds, uint16_t(ent + 0x14)));
+                    if (var > 0) dx_off = uint16_t((m.rd16(ds, uint16_t(desc + 8)) << 3) * uint16_t(var));
+                }
+                dx_off = uint16_t(dx_off + m.rd16(ds, uint16_t(desc + 0x0e + uint16_t(frame) * 2u)));
+                const uint16_t raw_rows = m.rd16(ds, uint16_t(desc + 0x0a));
+                if (raw_rows == 0 || raw_rows >= 64) continue;
+                const int erows = int(raw_rows) + 1;
+                const uint16_t data_off = uint16_t(m.rd16(ds, desc) + dx_off);
+                const uint16_t spr_seg = uint16_t(base_seg + (type < 0x16 ? 0x37fd : 0x419c));
+                const int alt = (tbl.alt_off >= 0) ? int(static_cast<int8_t>(m.rd8(ds, uint16_t(ent + tbl.alt_off)))) : tbl.fixed_alt;
+                const int pdx = int(static_cast<int8_t>(m.rd8(ds, uint16_t(ent + 3))));
+                const int pdy = int(static_cast<int8_t>(m.rd8(ds, uint16_t(ent + 4)))) - alt;
+                LiveEntity le{er, ec, pdx, pdy, alt, erows, nax::Machine::linear(spr_seg, data_off), tbl.airborne};
+                if (tbl.airborne) {
+                    air_entities.push_back(le);
+                } else {
+                    ground_entities.push_back(le);
+                }
+            }
+        }
+        std::stable_sort(ground_entities.begin(), ground_entities.end(), [](const LiveEntity& a, const LiveEntity& b) {
+            return (a.row + a.col) < (b.row + b.col);
+        });
+        std::stable_sort(air_entities.begin(), air_entities.end(), [](const LiveEntity& a, const LiveEntity& b) {
+            if ((a.row + a.col) != (b.row + b.col)) return (a.row + a.col) < (b.row + b.col);
+            return a.altitude < b.altitude;
+        });
+
+        auto emit_entity = [&](const LiveEntity& le) {
+            nax::WorldTile wt;
+            wt.row = float(le.row);
+            wt.col = float(le.col);
+            wt.width = 32;
+            wt.rows = le.rows;
+            wt.pixel_dx = le.pixel_dx;
+            wt.pixel_dy = le.pixel_dy;
+            const auto info = hd.resolve_world_sprite(m, le.data_lin, 32, le.rows, 0, true);
+            if (info.placed) {
+                wt.has_hd = true;
+                wt.dimmed = info.dimmed;
+                wt.atlas_x = info.atlas_x;
+                wt.atlas_y = info.atlas_y;
+            } else {
+                decode_4bit_rgba(m, le.data_lin, 32, le.rows, 0, true, &rgba_tmp);
+                wt.fallback_id = fallback.get_or_add(info.key, 32, le.rows, rgba_tmp.data());
+            }
+            out->tiles.push_back(wt);
+        };
+
+        // Build visible planet map tiles in strict back-to-front isometric painter's order (diagonal sum r + c),
+        // interleaving ground units on their exact diagonal so tall foreground buildings naturally occlude them.
+        out->tiles.reserve(size_t((r1 - r0 + 1) * (c1 - c0 + 1)) + ground_entities.size() + air_entities.size() + dynamics.size());
+        size_t gi = 0;
+        while (gi < ground_entities.size() && (ground_entities[gi].row + ground_entities[gi].col) < r0 + c0) {
+            emit_entity(ground_entities[gi++]);
+        }
         for (int sum = r0 + c0; sum <= r1 + c1; sum++) {
             const int r_lo = std::max(r0, sum - c1);
             const int r_hi = std::min(r1, sum - c0);
@@ -696,10 +829,16 @@ bool build_world_render(const nax::Machine& m, nax::HdSprites& hd, nax::WorldVie
                 wt.fallback_id = ct.fallback_id;
                 out->tiles.push_back(wt);
             }
+            while (gi < ground_entities.size() && (ground_entities[gi].row + ground_entities[gi].col) <= sum) {
+                emit_entity(ground_entities[gi++]);
+            }
         }
+        while (gi < ground_entities.size()) emit_entity(ground_entities[gi++]);
 
-        // Append dynamic map sprites (beacons 0..8, rovers/tanks, aliens, explosions, construction previews) projected
-        // from Utopia's 8x8 pixel coordinates into exact planet map coordinates.
+        // Emit airborne missiles, aircraft, explosions, pods, and beacons cleanly above buildings.
+        for (const auto& ae : air_entities) emit_entity(ae);
+
+        // Append map overlay sprites (construction previews from 0ffe:3364) projected from Utopia's 8x8 coordinates.
         for (const auto& d : dynamics) {
             const float bottom_y = float(d.bottom_up ? d.dos_y : (d.dos_y + d.rows - 1)) + 0.5f;
             const float cx = float(d.dos_x) + float(d.width) * 0.5f;

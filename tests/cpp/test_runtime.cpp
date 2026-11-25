@@ -1591,6 +1591,93 @@ const std::vector<Test> kTests = {
          const bool still_in_subdir = h >= 0 && f.close(h);
          return found && reported_size == 1234 && cd_ok && bad_cd_failed && still_in_subdir;
      }},
+    {"warning_banner_and_combined_message_toast_fit_cleanly_without_stealing_popup_clicks", [] {
+         nax::WorldView view;
+         view.sync_game_camera(30, 40);
+         const int W = 2560, H = 1080;
+         const auto strips = nax::WorldView::compute_hud_strips(W, H);
+         nax::WorldRenderData warn_world;
+         warn_world.win_w = W;
+         warn_world.win_h = H;
+         warn_world.has_bottom_message = true;
+         warn_world.has_warning_banner = true;
+         warn_world.bottom_msg_src_y = 159;
+         warn_world.bottom_msg_src_h = 10;
+         nax::HudStrip warn_strip = strips[1];
+         const bool warn_ok = nax::WorldView::fit_bottom_strip_for_message(warn_strip, &warn_world) &&
+                              warn_strip.src_y == 159 && warn_strip.src_h == 10 && warn_strip.key_out_backdrop &&
+                              warn_strip.dst.bottom == strips[1].dst.bottom && warn_strip.dst.top > strips[1].dst.top;
+         nax::WorldRenderData both_world = warn_world;
+         both_world.bottom_msg_src_h = 28;
+         nax::HudStrip both_strip = strips[1];
+         const bool both_ok = nax::WorldView::fit_bottom_strip_for_message(both_strip, &both_world) &&
+                              both_strip.src_y == 159 && both_strip.src_h == 28 &&
+                              both_strip.dst.top < warn_strip.dst.top && both_strip.dst.top >= 0;
+         // While a tall popup is open, a display-only warning banner must not steal popup clicks in hit_test.
+         nax::WorldRenderData pop_warn = warn_world;
+         pop_warn.has_popup = true;
+         pop_warn.popup_src_x = 16;
+         pop_warn.popup_src_y = 24;
+         pop_warn.popup_src_w = 224;
+         pop_warn.popup_src_h = 166;
+         pop_warn.popup_dst = nax::WorldView::compute_popup_rect(W, H, 224, 166, true, false);
+         const float pop_cx = float(pop_warn.popup_dst.left + pop_warn.popup_dst.right) * 0.5f;
+         const float pop_cy = float(pop_warn.popup_dst.top + pop_warn.popup_dst.bottom) * 0.5f;
+         const auto pop_hit = view.hit_test(pop_cx, pop_cy, W, H, 30, 40, &pop_warn);
+         const bool popup_clickable = pop_hit.kind == nax::WorldHit::Kind::hud &&
+                                      pop_hit.dos_x >= 16 && pop_hit.dos_x < 240 &&
+                                      pop_hit.dos_y >= 24 && pop_hit.dos_y < 190;
+         return warn_ok && both_ok && popup_clickable;
+     }},
+    {"nighttime_solar_panel_with_single_non_uniform_dimmed_accent_matches_daytime_hd_sprite", [] {
+         Fixture f;
+         const fs::path folder = f.root / L"hd";
+         // Utopia's exact Solar Panel daytime vs nighttime 6-bit DAC palette (index 3 dims from yellow (60,60,0) to amber (29,22,0)).
+         const uint8_t day_pal[8][3] = {
+             {51, 0, 0}, {44, 0, 0}, {60, 60, 0}, {0, 17, 0}, {38, 22, 12}, {29, 28, 34}, {31, 31, 31}, {24, 24, 34},
+         };
+         const uint8_t night_pal[8][3] = {
+             {31, 0, 0}, {26, 0, 0}, {29, 22, 0}, {0, 10, 0}, {22, 12, 8}, {17, 16, 24}, {19, 19, 23}, {14, 14, 24},
+         };
+         auto fill_sprite = [](nax::Machine& m) {
+             m.mem[kSpriteData + 0] = 0x12;
+             m.mem[kSpriteData + 1] = 0x34;
+             m.mem[kSpriteData + 2] = 0x56;
+             m.mem[kSpriteData + 3] = 0x78;
+         };
+         // Session 1: save daytime Solar Panel and provide its upscaled asset.
+         {
+             nax::Machine m;
+             nax::HdSprites hd;
+             hd.set_folder(folder);
+             for (int i = 0; i < 8; i++) std::memcpy(m.dac[0x41 + i], day_pal[i], 3);
+             fill_sprite(m);
+             hd.draw(m, kSpriteData, 32, 2, kDest, 0x40);
+             for (const auto& entry : fs::directory_iterator(folder / L"original"))
+                 fs::copy_file(entry.path(), folder / L"upscaled" / entry.path().filename());
+         }
+         // Session 2: nighttime palette matches the daytime HD asset with dimmed=true without writing a second PNG.
+         nax::Machine m;
+         nax::HdSprites hd;
+         hd.set_folder(folder);
+         for (int i = 0; i < 8; i++) std::memcpy(m.dac[0x41 + i], night_pal[i], 3);
+         fill_sprite(m);
+         hd.begin_world_frame();
+         (void)hd.resolve_world_sprite(m, kSpriteData, 32, 2, 0x40, true);
+         const auto pending = hd.take_pending();
+         if (pending.size() != 1) return false;
+         hd.placed(pending[0].slot, 120, 140);
+         hd.begin_world_frame();
+         const auto matched = hd.resolve_world_sprite(m, kSpriteData, 32, 2, 0x40, true);
+         // A hue-swapped accent (yellow (60,60,0) -> cyan (0,22,29)) must NOT match the daytime Solar Panel.
+         m.dac[0x43][0] = 0; m.dac[0x43][1] = 22; m.dac[0x43][2] = 29;
+         hd.begin_world_frame();
+         const auto swapped = hd.resolve_world_sprite(m, kSpriteData, 32, 2, 0x40, true);
+         size_t orig_count = 0;
+         for (const auto& entry : fs::directory_iterator(folder / L"original")) { (void)entry; orig_count++; }
+         return matched.placed && matched.dimmed && matched.atlas_x == 120 && matched.atlas_y == 140 &&
+                !swapped.placed && orig_count == 1;
+     }},
 };
 
 }  // namespace

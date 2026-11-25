@@ -88,7 +88,9 @@ struct WorldRenderData {
     int popup_src_x = 0, popup_src_y = 0, popup_src_w = 0, popup_src_h = 0;
     RECT popup_dst{};
     bool has_bottom_message = true;  // false when Utopia's bottom message console is empty (auto-hides the blank bar)
-    int bottom_msg_src_h = 0;        // when > 0, fits the bottom message toast tightly to active text rows (y = 170..)
+    bool has_warning_banner = false; // true when Utopia's top-of-console warning strip (y = 159..168, ds:[0x2e20]) is active
+    int bottom_msg_src_y = 170;      // source top row of the active message/warning toast (159 for warnings, 170 for console)
+    int bottom_msg_src_h = 0;        // when > 0, fits the bottom message toast tightly to active text rows
     bool has_game_cursor = false;
     float cursor_x = 0.0f, cursor_y = 0.0f;
     float cursor_scale_x = 3.0f, cursor_scale_y = 3.6f;
